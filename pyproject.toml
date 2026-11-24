@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cc-switcher"
+version = "0.1.0"
+description = "macOS menu bar + CLI to switch Claude Code accounts while keeping one fixed set of MCP sign-ins"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+keywords = ["claude", "claude-code", "account-switcher", "macos", "menu-bar", "mcp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "rumps>=0.4.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+cc-switcher = "cc_switcher.cli:main"
+ccs = "cc_switcher.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cc_switcher"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

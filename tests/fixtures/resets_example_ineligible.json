@@ -1,0 +1,10 @@
+{
+  "cedar_ember": {
+    "eligible": false,
+    "ineligible_reason": "surface",
+    "at_limit": false,
+    "weekly_resets_at": null,
+    "cooldown_until": null,
+    "grants": []
+  }
+}

@@ -1,0 +1,11 @@
+cc-switcher
+===========
+
+The menu bar icon (src/cc_switcher/resources/icon.png) comes from
+Symbioose/claude-account-switcher (https://github.com/Symbioose/claude-account-switcher),
+which is distributed under the MIT License. That project also inspired the overall idea
+of a macOS menu bar account switcher backed by Keychain. No source code was copied from it;
+cc-switcher's switching, usage, MCP and CLI code are written from scratch.
+
+"Claude" and "Claude Code" are trademarks of Anthropic. cc-switcher is an independent tool
+and is not affiliated with or endorsed by Anthropic.
