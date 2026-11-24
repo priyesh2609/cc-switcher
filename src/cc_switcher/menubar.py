@@ -93,6 +93,10 @@ def _menu_error(code: str | None) -> str:
         return f"{WARN} Sign-in expired — use “Add account…” to sign in again"
     if code == "rate_limited":
         return f"{WARN} Rate limited — retrying shortly"
+    if code == "refresh_queued":
+        return "Token refresh queued — retrying on a later poll"
+    if code == "refresh_schedule_error":
+        return f"{WARN} Token refresh schedule error — check disk space and app data permissions"
     if code == "network":
         return f"{WARN} Can’t reach Anthropic"
     if code == "token_stale":
@@ -147,6 +151,8 @@ def compact_usage_lines(
         age = cli.age_text(age_seconds)
         if stale:
             lines.append(f"{TILDE} Stale · updated {age} · last refresh: {cli.short_error_text(last_error)}")
+            if last_error == "refresh_schedule_error":
+                lines.append("Check disk space and app data permissions; seek help before changing a damaged schedule")
         else:
             lines.append(f"Updated {age}")
     return lines

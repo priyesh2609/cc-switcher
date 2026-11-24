@@ -168,6 +168,10 @@ def error_text(code: str | None) -> str:
         return "the login token has expired; Claude Code renews it the next time you use `claude`, then retry"
     if code == "rate_limited":
         return "A request was rate limited — retries follow the server's wait or backoff"
+    if code == "refresh_queued":
+        return "token refresh queued — retrying on a later poll"
+    if code == "refresh_schedule_error":
+        return "token refresh schedule unavailable — check disk space and app data permissions; seek help before changing a damaged schedule"
     if code == "network":
         return "couldn't reach Anthropic — check your internet connection"
     if code == "keychain_error":
@@ -191,6 +195,8 @@ def short_error_text(code: str | None) -> str:
         "no_credentials": "no saved login",
         "token_stale": "token needs refresh",
         "rate_limited": "rate limited",
+        "refresh_queued": "token refresh queued",
+        "refresh_schedule_error": "token refresh schedule error",
         "network": "offline",
         "bad_response": "bad response",
         "keychain_error": "Keychain locked",
@@ -656,12 +662,15 @@ def cmd_list(args: argparse.Namespace) -> int:
     print(accounts_table(status.accounts, entries, active_id))
     stale = [(a, entries[a.id]) for a in status.accounts if entry_is_stale(entries[a.id])]
     ages = [age for age in (entry_age(e) for e in entries.values()) if age is not None]
+    schedule_error = any(entry.get("last_error") == "refresh_schedule_error" for entry in entries.values())
+    if schedule_error:
+        print(f"\n{_sym('warn')} {error_text('refresh_schedule_error')}")
     if stale:
         print(f"\n{_sym('stale')} = stale: the last refresh failed, so these are the last good numbers.")
         for account, entry in stale:
             print(f"  {account.name}: {stale_phrase(entry)}")
         print("  `ccs usage <account>` explains each failure.")
-    elif args.refresh:
+    elif args.refresh and not schedule_error:
         print("\nUsage fetched just now.")
     elif ages:
         print(f"\nUsage from cache (updated {age_text(min(ages))}). `ccs list --refresh` fetches fresh numbers.")

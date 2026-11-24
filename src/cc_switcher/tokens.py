@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from cc_switcher import creds, fsutil, keychain, oauth, paths, store
+from cc_switcher import creds, fsutil, keychain, oauth, paths, refresh_schedule, store
 from cc_switcher.models import Account
 
 logger = logging.getLogger(__name__)
@@ -221,15 +221,62 @@ def access_token_for(
                 "Run `claude` and use /login."
             )
 
-        refreshed = oauth.refresh_login(login, http_post=http_post, now_ms=now_ms)
+        post_attempted = False
+        post_response = None
+
+        def scheduled_post(url, payload, *, headers, timeout):
+            nonlocal post_attempted, post_response
+            # oauth validates the refresh token and builds the request before reaching here.
+            # The existing lock protects both the reservation and the actual POST.
+            registered = store.load_accounts()
+            by_ref = {refresh_schedule._reference(item.id): item for item in registered}
+            current_registered = account.id in {item.id for item in registered}
+
+            def still_eligible(ref: str) -> bool:
+                # Public callers normally use registry accounts. Preserve the existing
+                # behavior for direct callers with an unregistered Account object.
+                if not current_registered:
+                    return True
+                other = by_ref.get(ref)
+                if other is None:
+                    return False
+                if known_live is not None and creds.login_account_id(known_live) == other.id:
+                    return False
+                try:
+                    other_login = _saved_login(other)
+                except (NoCredentials, keychain.KeychainError):
+                    return False  # no POST possible now; it may rejoin on a later poll
+                if (known_live is not None and other_login.get("refreshToken")
+                        and other_login.get("refreshToken") == known_live.get("refreshToken")):
+                    return False
+                return bool(other_login.get("refreshToken")) and oauth.is_expired(
+                    other_login, skew_seconds=SAVED_SKEW_SECONDS, now_ms=now_ms
+                )
+
+            refresh_schedule.reserve(account.id, is_eligible=still_eligible)
+            post_attempted = True
+            post_response = (http_post or oauth._default_http_post)(url, payload, headers=headers, timeout=timeout)
+            return post_response
+
         try:
-            _persist(account, refreshed)
-        except keychain.KeychainError:
-            # Raise so the failure shows (monitor: "keychain_error"), but keep the rotated login:
-            # the next call saves it once the Keychain works again, instead of the account
-            # being lost to a transient failure.
-            _UNSAVED[account.id] = (login.get("refreshToken"), refreshed)
-            logger.warning("Refreshed login for account %s could not be saved; kept in memory", account.id)
-            raise
-        logger.info("Refreshed saved login for account %s", account.id)
-        return refreshed["accessToken"]
+            refreshed = oauth.refresh_login(login, http_post=scheduled_post, now_ms=now_ms)
+            try:
+                _persist(account, refreshed)
+            except Exception:
+                # The server may already have revoked the old token; keep the replacement
+                # even if an unexpected write error prevents confirming it in Keychain.
+                _UNSAVED[account.id] = (login.get("refreshToken"), refreshed)
+                logger.warning("Refreshed login for account %s could not be saved; kept in memory", account.id)
+                raise
+            logger.info("Refreshed saved login for account %s", account.id)
+            return refreshed["accessToken"]
+        finally:
+            if post_attempted:
+                try:
+                    # Completion runs after saving or retaining rotated credentials, but
+                    # still under the lock. A 429's Retry-After is persisted here too.
+                    refresh_schedule.complete(account.id, post_response)
+                except Exception:
+                    # Leave the in-flight marker for conservative recovery; scheduling
+                    # errors must never discard a successfully rotated credential.
+                    logger.warning("Could not finish token refresh scheduling metadata")

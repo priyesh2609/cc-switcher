@@ -184,6 +184,14 @@ cc-switcher keeps the last good numbers when a refresh fails (rate limit, offlin
 
 It stops showing numbers only when the sign-in itself expired (the line then reads "sign-in expired"). Run `ccs add` for that account. `ccs usage <account>` says why the last refresh failed, and `ccs usage --json` has `age_seconds`, `stale`, `last_error` and `last_error_at` for scripts.
 
+### Token refresh queued
+
+cc-switcher spaces its OAuth token-refresh attempts by at least three minutes, including failed attempts. For example, if account A's refresh finishes at 10:00:12, account B cannot start its refresh before 10:03:12. The previous version could start B about half a second after A. While B waits, its last good usage stays visible and checks that can use a valid access token continue normally. The menu bar retries queued accounts on its next poll, which defaults to five minutes, so B may wait longer than three minutes.
+
+This coordination applies to cc-switcher processes sharing the same app directory; it cannot schedule Claude Code itself or independent manual requests. When upgrading from a version without the scheduler, stop all old cc-switcher processes and wait at least three minutes before starting the new version. Old and new processes do not share the scheduling state.
+
+If the app says the refresh schedule is unavailable or damaged, check disk space and permissions. Do not delete or replace its state file casually: that can defeat the spacing and a server's retry deadline. If a process crashes after receiving a 429 but before storing its retry header, the header cannot be recovered; the scheduler applies a fresh three-minute recovery wait.
+
 ### Usage unavailable or rate limited
 
 - "rate limited": either the token-refresh endpoint or the usage endpoint returned HTTP 429. Run `ccs usage <account>` for endpoint and retry details when available. cc-switcher respects the server's `Retry-After`, or uses exponential backoff if none was provided; the last good numbers remain marked stale. For example, a 429 with `Retry-After: 7200` at 10:00 means the next request is not before 12:00. Older cache entries do not identify the endpoint. Do not run `ccs list --refresh` in a loop.

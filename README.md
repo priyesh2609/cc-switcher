@@ -17,6 +17,7 @@ One thing it cannot fix: claude.ai connectors (the `claude.ai Slack` kind) belon
 - **Switching that keeps MCP sign-ins.** Only the Claude login is swapped; the MCP tokens never move.
 - **One-click or one-command.** Click an account in the menu bar, or run `ccs switch work` / `ccs next`.
 - **Usage for every saved account.** Session (5h) and weekly percentages, per-model weekly limits, reset times, extra-usage credits remaining out of the monthly limit, and promo credits.
+- **Spaced token refreshes.** cc-switcher queues OAuth token-refresh attempts at least three minutes apart across its processes. Usage checks using valid tokens remain independent.
 - **Redeemable limit resets.** How many you have left on each account and when they expire, shown next to the usage. cc-switcher only displays them: you spend one inside Claude Code with the `/limit-reset` command, and cc-switcher never spends one for you.
 - **Honest about data age.** Every number shows how old it is. If a refresh fails (rate limit, offline) the last good numbers stay on screen, marked `~` and "stale", instead of turning into an error. Numbers that are too old are ignored when choosing an account to switch to.
 - **Alerts.** A notification when a window crosses 80%, 95% and 100% (configurable), when a window resets, and when an account needs to sign in again.

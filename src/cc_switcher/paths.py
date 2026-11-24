@@ -67,6 +67,10 @@ def usage_history_file() -> Path:
     return app_dir() / "usage-history.jsonl"
 
 
+def refresh_schedule_file() -> Path:
+    return app_dir() / "refresh-schedule.json"
+
+
 def mcp_profile_file() -> Path:
     return app_dir() / "mcp-profile.json"
 

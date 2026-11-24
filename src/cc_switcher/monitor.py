@@ -22,8 +22,9 @@ functions that read-modify-write app files (``refresh_all``'s final persist, ``s
 
 Error codes on a failed snapshot (``UsageSnapshot.error``): ``no_credentials``, ``token_stale``,
 ``auth_expired``, ``rate_limited``, ``network``, ``http_<n>``, ``bad_response`` plus three
-monitor-only codes: ``keychain_error`` (Keychain unreadable/locked), ``busy`` (another cc-switcher
-operation held the lock too long) and ``internal_error`` (unexpected exception; never raised).
+monitor-only codes: ``refresh_queued`` (waiting for an OAuth slot), ``refresh_schedule_error``
+(scheduling metadata unavailable), ``keychain_error`` (Keychain unreadable/locked), ``busy``
+(another cc-switcher operation held the lock too long), and ``internal_error`` (unexpected exception).
 ``describe_error(code)`` turns any code into a short human sentence.
 """
 
@@ -39,7 +40,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from cc_switcher import fsutil, keychain, oauth, paths, store, tokens, usage
+from cc_switcher import fsutil, keychain, oauth, paths, refresh_schedule, store, tokens, usage
 from cc_switcher.models import (
     Account,
     BreakdownRow,
@@ -83,6 +84,7 @@ RESET_LOW_PERCENT = 20.0  # ... and fall below this after its reset time to coun
 ERROR_MESSAGES = {
     "no_credentials": "No saved login. Add the account again.",
     "token_stale": "Waiting for Claude Code to refresh this login.",
+    "refresh_schedule_error": "Token refresh schedule unavailable; check disk space and app data permissions.",
     "auth_expired": "Sign-in expired. Add the account again.",
     "rate_limited": "Rate-limited by the usage endpoint; will retry shortly.",
     "network": "Could not reach Anthropic.",
@@ -623,6 +625,10 @@ def _refresh(
         return fail("no_credentials")
     except tokens.TokenStale:
         return fail("token_stale")
+    except refresh_schedule.RefreshQueued:
+        return fail("refresh_queued")
+    except refresh_schedule.ScheduleError:
+        return fail("refresh_schedule_error")
     except oauth.RefreshRejected:
         return fail("auth_expired")
     except oauth.OAuthError as exc:

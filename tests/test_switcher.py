@@ -1941,12 +1941,18 @@ def test_a_login_landing_while_the_kept_one_is_being_put_live_wins(w, monkeypatc
 
 
 def test_switch_saves_only_the_target_and_outgoing_kept_logins(w, monkeypatch):
+    from cc_switcher import refresh_schedule
+
+    clock = {"wall": 1800000000.0, "mono": 10000.0}
+    monkeypatch.setattr(refresh_schedule, "_clock", lambda: dict(clock))
     w.register(w.s.ACCOUNT_A, "a@example.com", token="A1")
     w.register(w.s.ACCOUNT_B, "b@example.com", token="B1")
     w.register(ACCOUNT_C, "c@example.com", token="C1")
     w.set_live(w.live_blob(w.s.make_login(w.s.ACCOUNT_A, "A1")))
     id_c = make_account_id(*ACCOUNT_C)
     state_c = _refresh_but_lose_the_save(w, monkeypatch, ACCOUNT_C, "C1", "C2")
+    clock["wall"] += 180
+    clock["mono"] += 180
     state_b = _refresh_but_lose_the_save(w, monkeypatch, w.s.ACCOUNT_B, "B1", "B2", fresh_stash=False)
     state_b["drop"] = state_c["drop"] = False
     reads = []
