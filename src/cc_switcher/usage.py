@@ -5,7 +5,7 @@
 ``UsageSnapshot`` and never raises on shapes it does not recognise: the server adds codename
 fields (``cinder_cove``, ``wattle_ember`` ...) without notice.
 
-``opener`` contract (injectable, default = ``urllib.request.urlopen`` resolved at call time):
+``opener`` contract (injectable, default = CCS's urllib opener without a User-Agent):
 either a callable ``opener(request, timeout=...)`` or an object with ``.open(request, timeout=...)``,
 returning a response with ``.read()`` (and optionally ``.status``/``.getcode()``/``.close()``).
 HTTP error statuses are signalled the way urllib does it: by raising ``urllib.error.HTTPError``.
@@ -29,7 +29,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable
 
-from cc_switcher import paths
+from cc_switcher import http_transport, paths
 from cc_switcher.models import (
     WINDOW_LABELS,
     BreakdownRow,
@@ -139,7 +139,7 @@ def user_agent() -> str:
 
 def _open(opener: Any, request: urllib.request.Request, timeout: float):
     if opener is None:
-        return urllib.request.urlopen(request, timeout=timeout)
+        return http_transport.open_without_user_agent(request, timeout=timeout)
     if hasattr(opener, "open"):
         return opener.open(request, timeout=timeout)
     return opener(request, timeout=timeout)
@@ -211,7 +211,6 @@ def _get_json(url: str, access_token: str, *, opener: Any, timeout: float) -> di
             "Accept": "application/json",
             "Authorization": f"Bearer {access_token}",
             "anthropic-beta": paths.OAUTH_BETA_HEADER,
-            "User-Agent": user_agent(),
         },
         method="GET",
     )

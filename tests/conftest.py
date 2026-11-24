@@ -103,6 +103,7 @@ def block_side_effects(monkeypatch):
     monkeypatch.setattr(subprocess, "check_call", _no_subprocess)
     monkeypatch.setattr(subprocess, "call", _no_subprocess)
     monkeypatch.setattr(urllib.request, "urlopen", _no_network)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", _no_network)
 
 
 # ----------------------------------------------------------------------------- sample data

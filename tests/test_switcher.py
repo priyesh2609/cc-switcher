@@ -119,6 +119,143 @@ def w(fake_keychain, samples, isolated_env) -> World:
     return World(fake_keychain, samples, isolated_env)
 
 
+@pytest.fixture
+def refresh_guard(monkeypatch, strict_lock):
+    """Fake the refresh engine while exercising switcher's real credential operations."""
+    import cc_switcher
+
+    class FakeRefresh:
+        class RecoveryRequired(RuntimeError):
+            pass
+
+        def __init__(self):
+            self.unresolved = False
+            self.login_nonce = None
+
+        def guard_locked(self):
+            assert strict_lock["held"]
+            if self.unresolved:
+                raise self.RecoveryRequired("sk-ant-private-guard-detail")
+
+        def begin_login_locked(self):
+            assert strict_lock["held"]
+            assert self.login_nonce is None
+            self.login_nonce = "login-nonce"
+            return self.login_nonce
+
+        def end_login_locked(self, nonce):
+            assert strict_lock["held"]
+            assert nonce == self.login_nonce
+            self.login_nonce = None
+
+    fake = FakeRefresh()
+    monkeypatch.setattr(cc_switcher, "claude_refresh", fake, raising=False)
+    return fake
+
+
+@pytest.mark.parametrize("operation", ["switch", "save", "import", "remove", "add"])
+def test_unresolved_refresh_blocks_credential_operations(w, refresh_guard, operation):
+    a = w.register(w.s.ACCOUNT_A, "a@example.com")
+    b = w.register(w.s.ACCOUNT_B, "b@example.com")
+    w.set_live(w.live_blob(w.s.make_login(w.s.ACCOUNT_A)))
+    before_items = copy.deepcopy(w.fake.items)
+    before_accounts = store.load_accounts()
+    refresh_guard.unresolved = True
+    login_calls = []
+    actions = {
+        "switch": lambda: switcher.switch_to(b.id),
+        "save": switcher.save_active_login,
+        "import": switcher.import_current,
+        "remove": lambda: switcher.remove_account(a.id, force=True),
+        "add": lambda: switcher.add_account(runner=lambda argv: login_calls.append(argv)),
+    }
+
+    with pytest.raises(switcher.SwitchError) as error:
+        actions[operation]()
+
+    assert "sk-ant-private-guard-detail" not in str(error.value)
+    assert w.fake.items == before_items
+    assert store.load_accounts() == before_accounts
+    assert login_calls == []
+    assert refresh_guard.login_nonce is None
+
+
+@pytest.mark.parametrize("outcome", ["success", "error", "interrupt"])
+def test_add_login_marker_covers_unlocked_runner_and_clears_after_finish(w, refresh_guard, strict_lock, outcome):
+    w.register(w.s.ACCOUNT_A, "a@example.com")
+    original = w.live_blob(w.s.make_login(w.s.ACCOUNT_A))
+    w.set_live(original)
+
+    def runner(argv):
+        assert not strict_lock["held"]
+        assert refresh_guard.login_nonce == "login-nonce"
+        if outcome == "error":
+            raise OSError("simulated runner failure")
+        if outcome == "interrupt":
+            raise KeyboardInterrupt()
+        return 1
+
+    if outcome == "success":
+        assert switcher.add_account(runner=runner) is None
+    elif outcome == "error":
+        with pytest.raises(switcher.SwitchError):
+            switcher.add_account(runner=runner)
+    else:
+        with pytest.raises(KeyboardInterrupt):
+            switcher.add_account(runner=runner)
+
+    assert refresh_guard.login_nonce is None
+    assert w.live() == original
+
+
+@pytest.mark.parametrize("runner_fails", [False, True])
+def test_add_keeps_login_marker_when_finish_fails(w, refresh_guard, monkeypatch, runner_fails):
+    w.register(w.s.ACCOUNT_A, "a@example.com")
+    w.set_live(w.live_blob(w.s.make_login(w.s.ACCOUNT_A)))
+
+    def fail_finish(*args, **kwargs):
+        raise switcher.SwitchError("simulated finish failure")
+
+    def runner(argv):
+        if runner_fails:
+            raise OSError("simulated runner failure")
+        return 1
+
+    monkeypatch.setattr(switcher, "_add_finish_locked", fail_finish)
+    with pytest.raises(switcher.SwitchError, match="simulated finish failure"):
+        switcher.add_account(runner=runner)
+
+    assert refresh_guard.login_nonce == "login-nonce"
+
+
+def test_add_marker_allows_existing_concurrent_switch(w, refresh_guard):
+    w.register(w.s.ACCOUNT_A, "a@example.com")
+    b = w.register(w.s.ACCOUNT_B, "b@example.com")
+    w.set_live(w.live_blob(w.s.make_login(w.s.ACCOUNT_A)))
+
+    def runner(argv):
+        assert refresh_guard.login_nonce == "login-nonce"
+        switcher.switch_to(b.id)
+        return 1
+
+    assert switcher.add_account(runner=runner) is None
+    assert refresh_guard.login_nonce is None
+    assert switcher.live_account_id() == b.id
+
+
+def test_add_leaves_marker_if_refresh_needs_recovery_after_runner(w, refresh_guard):
+    w.register(w.s.ACCOUNT_A, "a@example.com")
+    w.set_live(w.live_blob(w.s.make_login(w.s.ACCOUNT_A)))
+
+    def runner(argv):
+        refresh_guard.unresolved = True
+        return 1
+
+    with pytest.raises(switcher.SwitchError, match="recovery"):
+        switcher.add_account(runner=runner)
+    assert refresh_guard.login_nonce == "login-nonce"
+
+
 # ----------------------------------------------------------------------------- find_claude
 
 
@@ -244,6 +381,32 @@ def test_switch_saves_outgoing_rotated_tokens(w):
     switcher.switch_to(b.id)
 
     assert w.saved(a.id) == {"claudeAiOauth": w.s.make_login(w.s.ACCOUNT_A, "rotated")}
+
+
+def test_switch_to_expired_login_saves_claude_code_rotation_before_switching_away(w):
+    a = w.register(w.s.ACCOUNT_A, "a@example.com", token="a-saved")
+    b = w.register(w.s.ACCOUNT_B, "b@example.com", token="b-saved")
+    expired_b = w.s.make_login(w.s.ACCOUNT_B, "b-expired", expires_at_ms=1)
+    w.fake.put_json(paths.saved_login_service(b.id), {"claudeAiOauth": expired_b})
+    original = w.live_blob(w.s.make_login(w.s.ACCOUNT_A, "a-live"))
+    w.set_live(original)
+
+    switcher.switch_to(b.id)
+    live_b = w.live()
+    assert live_b["claudeAiOauth"] == expired_b
+    assert live_b["mcpOAuth"] == original["mcpOAuth"]
+    assert live_b["mcpOAuthClientConfig"] == original["mcpOAuthClientConfig"]
+
+    # Simulate Claude Code rotating B's live credentials, without invoking authentication.
+    rotated_b = w.s.make_login(w.s.ACCOUNT_B, "b-rotated")
+    live_b["claudeAiOauth"] = rotated_b
+    w.set_live(live_b)
+    switcher.switch_to(a.id)
+
+    assert w.saved(b.id) == {"claudeAiOauth": rotated_b}
+    assert w.live()["claudeAiOauth"] == original["claudeAiOauth"]
+    assert w.live()["mcpOAuth"] == original["mcpOAuth"]
+    assert w.live()["mcpOAuthClientConfig"] == original["mcpOAuthClientConfig"]
 
 
 def test_switch_auto_imports_unregistered_live_login(w):
@@ -979,6 +1142,11 @@ def test_add_with_label_taken_still_saves_the_login(w):
         switcher.add_account("work", runner=runner)
     assert store.get_account(w.id_b).label == ""
     assert w.saved(w.id_b) is not None
+    from cc_switcher import claude_refresh
+
+    with fsutil.app_lock():
+        claude_refresh.guard_no_login_locked()
+    assert tokens.access_token_for(store.get_account(w.id_b)) == w.s.make_login(w.s.ACCOUNT_B)["accessToken"]
 
 
 def test_add_without_claude_installed(w, monkeypatch):
@@ -1694,11 +1862,9 @@ def _refresh_but_lose_the_save(w, monkeypatch, ident, old: str, new: str, *, fre
 
     monkeypatch.setattr(keychain, "write", write)
 
-    def post(url, payload, *, headers, timeout):
-        return 200, {"access_token": f"sk-ant-oat01-fake-{new}", "refresh_token": _tok(new), "expires_in": 28800}
-
-    with pytest.raises(keychain.KeychainError):
-        tokens.access_token_for(store.get_account(account_id), http_post=post)
+    # Simulate the legacy in-memory recovery state directly; the new refresh
+    # runner no longer posts to the token endpoint from CCS.
+    tokens._UNSAVED[account_id] = (_tok(old), w.s.make_login(ident, new))
     assert account_id in tokens._UNSAVED
     return state
 

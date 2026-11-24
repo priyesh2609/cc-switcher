@@ -61,6 +61,35 @@ class _LabelTaken(SwitchError):
     """Another account already uses the requested label."""
 
 
+class _LoginCompletedError(SwitchError):
+    """Login and credential reconciliation completed, but a label could not be applied."""
+
+
+def _refresh_guard_locked() -> Any:
+    """Fail closed before changing credentials while refresh recovery is unresolved."""
+    try:
+        from cc_switcher import claude_refresh
+
+        claude_refresh.guard_locked()
+        return claude_refresh
+    except Exception:
+        raise SwitchError("Credential recovery is required before changing accounts.") from None
+
+
+def _begin_login_locked(refresh: Any) -> str:
+    try:
+        return refresh.begin_login_locked()
+    except Exception:
+        raise SwitchError("Couldn't protect the login operation. Try again after credential recovery.") from None
+
+
+def _end_login_locked(refresh: Any, nonce: str) -> None:
+    try:
+        refresh.end_login_locked(nonce)
+    except Exception:
+        raise SwitchError("Couldn't finish protecting the login operation. Credential recovery is required.") from None
+
+
 class LoginInterrupted(KeyboardInterrupt):
     """``add_account`` was interrupted after ``claude auth login`` had stored a new login.
 
@@ -173,6 +202,7 @@ def import_current(label: str = "", runner: StatusRunner | None = None) -> Accou
     ``runner`` runs ``claude auth status --json`` (only used when the email is unknown).
     """
     with fsutil.app_lock():
+        _refresh_guard_locked()
         live = live_blob()
         login = creds.get_login(live)
         if login is None:
@@ -183,12 +213,14 @@ def import_current(label: str = "", runner: StatusRunner | None = None) -> Accou
 def save_active_login() -> Account | None:
     """Copy the live login into its account's saved item when they differ. Returns the active account."""
     with fsutil.app_lock():
+        _refresh_guard_locked()
         return _save_active_login_locked()
 
 
 def switch_to(account_id: str) -> Account:
     """Make ``account_id`` the live Claude login, keeping every MCP sign-in. Returns the account."""
     with fsutil.app_lock():
+        _refresh_guard_locked()
         return _switch_to_locked(account_id)
 
 
@@ -211,31 +243,49 @@ def add_account(
     argv = [claude or "claude", "auth", "login"]
     login_runner = runner or _login_runner
 
-    # Phase 1 (lock): keep the outgoing login (I5) and snapshot the item to repair MCP state later.
+    # Phase 1 (lock): save the outgoing login and protect the unlocked login interval.
     with fsutil.app_lock():
+        refresh = _refresh_guard_locked()
         before = _add_prepare_locked()
+        login_nonce = _begin_login_locked(refresh)
 
-    # Phase 2 (NO lock): interactive login; can take minutes.
+    # Phase 2 (NO lock): interactive login; can take minutes. The marker excludes refresh.
     try:
         rc = login_runner(argv)
     except BaseException as exc:
         # Still finish: restore MCP state, and save a login that completed before the interrupt.
         with fsutil.app_lock():
-            saved = _add_finish_locked(before, rc=None, label=label, status_runner=status_runner)
+            _refresh_guard_locked()
+            saved = _finish_protected_login_locked(refresh, login_nonce, before, rc=None, label=label, status_runner=status_runner)
         if isinstance(exc, OSError):
             raise SwitchError(f"Couldn't run `claude auth login`: {exc.strerror or exc}") from exc
         if isinstance(exc, KeyboardInterrupt) and saved is not None:
             raise LoginInterrupted(saved) from exc
         raise
 
-    # Phase 3 (lock): put back MCP stores the login wiped (I1); import the new login.
+    # Phase 3 (lock): repair MCP, import the new login, then clear the marker.
     with fsutil.app_lock():
-        return _add_finish_locked(before, rc=rc, label=label, status_runner=status_runner)
+        _refresh_guard_locked()
+        return _finish_protected_login_locked(refresh, login_nonce, before, rc=rc, label=label, status_runner=status_runner)
+
+
+def _finish_protected_login_locked(refresh: Any, nonce: str, before: dict[str, Any], *,
+                                   rc: int | None, label: str, status_runner: StatusRunner | None) -> Account | None:
+    try:
+        result = _add_finish_locked(before, rc=rc, label=label, status_runner=status_runner)
+    except _LoginCompletedError:
+        # Account B was saved successfully, but A already uses the label "work".
+        # Clear ownership for this completed login; genuine storage failures keep it.
+        _end_login_locked(refresh, nonce)
+        raise
+    _end_login_locked(refresh, nonce)
+    return result
 
 
 def remove_account(account_id: str, force: bool = False) -> None:
     """Delete an account's saved login and registry row. Refuses the active account unless ``force``."""
     with fsutil.app_lock():
+        _refresh_guard_locked()
         account = store.get_account(account_id)
         if account is None:
             # Clean up an orphaned saved item if there is one; otherwise it's a bad id.
@@ -614,7 +664,7 @@ def _add_finish_locked(
             return _import_login_locked(after_login, label, auth_status=True, status_runner=status_runner)
         except _LabelTaken as exc:
             account = _import_login_locked(after_login, "", auth_status=True, status_runner=status_runner)
-            raise SwitchError(f"Added {_name(account)} without a label. {exc}") from exc
+            raise _LoginCompletedError(f"Added {_name(account)} without a label. {exc}") from exc
     except (keychain.KeychainError, OSError) as exc:
         raise SwitchError(
             f"Claude Code is now logged in to the new account, but cc-switcher couldn't save it: "

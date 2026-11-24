@@ -5,21 +5,21 @@ cc-switcher gives you the `ccs` command and a menu bar app for switching Claude 
 ## Requirements
 
 - macOS 12 or later
-- Claude Code, installed and signed in at least once. If it is missing, the installer tells you how to get it (`curl -fsSL https://claude.ai/install.sh | bash`, or see https://docs.claude.com/en/docs/claude-code/setup).
+- A recent Claude Code installation, signed in at least once. Experimental renewal was checked against Claude Code 2.1.330. If Claude Code is missing, the installer tells you how to get it (`curl -fsSL https://claude.ai/install.sh | bash`, or see https://docs.claude.com/en/docs/claude-code/setup).
 - An internet connection (for the installer, the Claude sign-in, and usage numbers)
 
 You do not need Python or uv in advance: the installer sets them up (uv through Homebrew if you have it, otherwise through uv's official installer).
 
 ## Install on this Mac
 
-You host the repository yourself, so first get it onto the Mac (clone it from wherever you keep it, or copy the folder). Then:
+First get the repository onto the Mac, or use an existing checkout. Then:
 
 ```bash
 cd cc-switcher
 scripts/install.sh
 ```
 
-The script is safe to run again. It prints each step as it goes:
+The script is safe to run again. Unless `--no-agent` is used, it starts the menu bar app, which may check usage. Experimental inactive-account renewal is off by default; if it was previously enabled, the app may invoke Claude Code and consume plan usage or incur charges. The script prints each step as it goes:
 
 1. Checks that this is macOS 12 or later.
 2. Looks for Claude Code and warns, with the install command, if it is missing.
@@ -38,15 +38,41 @@ Options:
 | `scripts/install.sh --no-agent` | Do not start the menu bar app at login. |
 | `CC_SWITCHER_SOURCE=<path or git URL>` | Install from somewhere other than the repo the script sits in. |
 | `CC_SWITCHER_MCP_PROFILE=<file>` | Apply this MCP profile after installing. |
-| `CC_SWITCHER_CLAUDE_PATH=<absolute path>` | Choose the Claude Code executable used for login, MCP setup and version detection. |
+| `CC_SWITCHER_CLAUDE_PATH=<absolute path>` | Choose the Claude Code executable used for login, isolated renewal, MCP setup and version detection. |
 
 Example: `CC_SWITCHER_SOURCE=https://example.com/you/cc-switcher.git CC_SWITCHER_MCP_PROFILE=~/mcp-profile.json scripts/install.sh`. A plain `https://...` or `ssh://...` URL is treated as a git repository.
 
 ## Install on another Mac
 
-Do the same thing there: get the repository onto that Mac (clone or copy), run `scripts/install.sh`, then add its accounts (next section) and apply your MCP profile (the section after).
+First push the desired commit to `main` yourself. A commit that exists only on the first Mac cannot be fetched on the second. On the other Mac, install a recent Claude Code and sign in, then clone `main` and install without starting the menu bar agent:
 
-What does not carry over by itself: saved logins, MCP sign-ins, and the account list. Each Mac has its own. After `ccs mcp apply` on the new Mac, run `claude`, open `/mcp` and sign in to each server once; those tokens are per Mac too (see [MCP.md](MCP.md)).
+```bash
+git clone --branch main https://github.com/priyesh2609/cc-switcher.git
+cd cc-switcher
+git log -1 --oneline         # check that this is the intended commit
+scripts/install.sh --no-agent
+```
+
+If you already cloned the repository, fetch the pushed commit and check out the intended revision before running the installer. If the installer says `ccs` is not on PATH, add the printed line to your shell configuration and open a new Terminal window. The installer may import the currently signed-in account; add the others explicitly (next section) and check the installation:
+
+```bash
+ccs add --label work         # repeat for each other account, signing in separately
+ccs --version                # 0.2.0 for this version; also check the source commit above
+ccs doctor
+ccs list
+```
+
+To opt in to experimental isolated renewal on this trusted installation, enable it before starting the agent:
+
+```bash
+ccs settings claude_refresh_enabled true
+ccs agent install
+ccs agent status
+```
+
+These checks do not prove an inactive-account renewal worked. A usage refresh makes network requests and, when the feature is enabled and an inactive token has expired, can invoke a noninteractive Claude Code model request that consumes plan usage and may incur charges. To leave renewal disabled, skip the settings command; you can still start the agent.
+
+Apply your MCP profile separately (the section after). Saved logins, recovery credentials, MCP sign-ins and the account list do not carry over by themselves. Do not copy tokens or recovery files between Macs. After `ccs mcp apply`, run `claude`, open `/mcp` and sign in to each server once (see [MCP.md](MCP.md)).
 
 ## Add your accounts (on each Mac, once per account)
 
@@ -89,6 +115,20 @@ The sign-in step is once per Mac per server: MCP tokens are per device too. Afte
 
 Details, including claude.ai connectors (which cannot be pinned) and how to avoid duplicate Slack/Notion entries: [MCP.md](MCP.md).
 
+## Experimental inactive-account renewal
+
+Version 0.2.0 ships this feature **off by default**. Enable it only if you trust the installed Claude Code executable and its environment:
+
+```bash
+ccs settings claude_refresh_enabled true
+```
+
+To disable it later, run `ccs settings claude_refresh_enabled false`.
+
+Only an expired inactive login triggers a child when the feature is enabled. For example, `work` remains active while `home` has an expired access token: cc-switcher may invoke Claude Code to renew `home`; a valid saved token still serves usage GETs without a child. With the feature off, cc-switcher does not renew `home`, and its last good usage may become stale until the login is renewed.
+
+The child makes a noninteractive Haiku request at low effort: `Reply with OK only.` It sets a $0.10 CLI budget limit, consumes plan usage and may incur charges. Tools, MCP, and user/project settings and hooks are disabled where supported, but managed policy may override this. The separate configuration and Keychain context are not an OS sandbox. Renewal does not initiate a login, and cc-switcher makes no direct token-refresh POST; Claude Code handles OAuth internally.
+
 ## Daily use
 
 ```bash
@@ -123,13 +163,15 @@ The menu bar app runs as a LaunchAgent (`~/Library/LaunchAgents/dev.cc-switcher.
 
 ## Update
 
+Before updating, quit all running cc-switcher menu bar instances, including any started manually, so old and new processes do not refresh the same saved login at the same time. Then update the source and reinstall:
+
 ```bash
 cd cc-switcher
 git pull
 scripts/install.sh
 ```
 
-The script reinstalls from the current source, restarts the menu bar app with the new code, and leaves your accounts and settings alone.
+The script reinstalls from the current source and attempts to restart the LaunchAgent with the new code; it leaves your accounts and settings alone. Check `ccs agent status` and `ccs doctor` afterwards. A version number alone does not identify which commit was installed.
 
 ## Uninstall
 
@@ -139,7 +181,7 @@ scripts/uninstall.sh
 
 This stops the menu bar app, removes the LaunchAgent, and removes the `ccs` command. Your saved logins and settings are kept, so a later reinstall picks them up.
 
-To delete those too:
+To delete those too, first resolve any incomplete credential recovery. A recovery file may hold the only usable rotated credentials; do not purge it casually.
 
 ```bash
 scripts/uninstall.sh --purge
@@ -157,7 +199,7 @@ cc-switcher reads and writes Keychain items through `/usr/bin/security`, the sam
 
 ### "sign-in expired"
 
-Example: you have not used your `home` account for six weeks. Its saved refresh token expired, so `ccs usage home` shows "sign-in expired — run `ccs add` again for this account". Run:
+Example: `ccs usage home` reports that the saved sign-in has expired and needs to be added again. cc-switcher does not automatically open a login flow. When you are ready to sign in again, run:
 
 ```bash
 ccs add --label home
@@ -165,40 +207,35 @@ ccs add --label home
 
 and sign in as `home`. The saved login is replaced; the label and the rest of the entry are kept. The other accounts are not affected.
 
-### "The refreshed login could not be saved to Keychain"
+### Isolated renewal or recovery fails
 
-Example: `work` is not the account you are using, and its saved token has expired. At 09:00 the menu bar app refreshes it. Anthropic issues a new token and revokes the old one, but at that moment your login keychain is locked, so cc-switcher cannot store the new token. It keeps the new token in memory and shows this message. At 09:05 you unlock the keychain; the next refresh (the menu bar app tries again every few minutes) saves it, and nothing else is needed.
+For example, `work` is inactive, its saved access token has expired, and experimental renewal is enabled. cc-switcher invokes Claude Code in a separate configuration and Keychain context; it does not automatically reauthenticate. If the renewal cannot complete, usage may remain stale or show an error. If Claude Code rotated credentials but Keychain failed, the old saved credentials may no longer work.
 
-Two ways it goes wrong:
+If the child was reaped and the successor safely saved but its result was an opaque failure, automatic retries for that account pause until its refresh grant changes, for example after sign-in or native rotation. If the child or credentials remain ambiguous, a journal and credential staging persist and block credential mutations. There is no automatic recovery or deletion; stop and seek help rather than retrying or removing files.
 
-- You quit the menu bar app before the Keychain was available. The new token existed only in that app's memory, so it is gone, and the saved copy is the revoked one. `ccs usage work` then says "sign-in expired". Run `ccs add --label work` once.
-- You run `ccs list --refresh` in a terminal while the menu bar app is holding the new token. The terminal process only has the revoked saved copy, so its refresh is rejected and it tells you to run `ccs add`. Wait for the menu bar app to save it, or unlock the keychain first.
-
-cc-switcher never writes tokens to a plain file to avoid this, because a file on disk is easier to leak than the Keychain. The cost is the narrow window above.
+Claude Code may use a plaintext recovery file with `0600` permissions in a private `0700` directory when Keychain fails. It can persist to permit recovery and contains secrets. Do not copy, share or delete it casually. A separate marker prevents renewal during `ccs add`; if that process crashes and leaves its marker behind, recovery may also require help.
 
 ### Usage shows "stale"
 
 Example: at 09:00 `ccs list` shows `work` at 62% session. At 09:12 Anthropic rate-limits the usage request, so the 09:12 refresh fails. `ccs list` now shows `62%~` with `12m ago (stale)` in the UPDATED column, and the menu bar title reads `62%~` with a first menu line saying the number is from 12m ago (last refresh: rate limited).
 
-cc-switcher keeps the last good numbers when a refresh fails (rate limit, offline, Claude Code idle overnight) and shows their age, so a short outage does not blank your usage. It also ignores numbers that are too old when it decides on a switch: auto-switch ignores the active account's numbers after 15 minutes, and `ccs next` and "Switch to best available" ignore another account's numbers after 30 minutes.
+cc-switcher keeps the last good numbers when a transient refresh fails (for example, rate limit or offline) and shows their age. It also ignores numbers that are too old when it decides on a switch: auto-switch ignores the active account's numbers after 15 minutes, and `ccs next` and "Switch to best available" ignore another account's numbers after 30 minutes.
 
-It stops showing numbers only when the sign-in itself expired (the line then reads "sign-in expired"). Run `ccs add` for that account. `ccs usage <account>` says why the last refresh failed, and `ccs usage --json` has `age_seconds`, `stale`, `last_error` and `last_error_at` for scripts.
+If no good numbers were fetched, or the login is reported unusable, usage can show an error instead. `ccs usage <account>` says why the last refresh failed, and `ccs usage --json` has `age_seconds`, `stale`, `last_error` and `last_error_at` for scripts. If sign-in has expired, you may need to add the account again; cc-switcher will not reauthenticate automatically.
 
-### Token refresh queued
+### Inactive-account renewal queued
 
-cc-switcher spaces its OAuth token-refresh attempts by at least three minutes, including failed attempts. For example, if account A's refresh finishes at 10:00:12, account B cannot start its refresh before 10:03:12. The previous version could start B about half a second after A. While B waits, its last good usage stays visible and checks that can use a valid access token continue normally. The menu bar retries queued accounts on its next poll, which defaults to five minutes, so B may wait longer than three minutes.
+When experimental renewal is enabled and an inactive saved access token has expired, cc-switcher invokes a noninteractive Claude Code model request in a separate configuration and Keychain context. This consumes plan usage and may incur charges. cc-switcher makes no direct token-refresh POST; Claude Code handles OAuth internally. Invocations are spaced globally by at least three minutes from completion, including failed attempts. For example, if one invocation finishes at 10:00:12, the next starts no earlier than 10:03:12; the polling interval can make it later. This does not guarantee three minutes between the child's internal requests, or the same rate limits or server treatment as other Claude Code activity.
 
-This coordination applies to cc-switcher processes sharing the same app directory; it cannot schedule Claude Code itself or independent manual requests. When upgrading from a version without the scheduler, stop all old cc-switcher processes and wait at least three minutes before starting the new version. Old and new processes do not share the scheduling state.
-
-If the app says the refresh schedule is unavailable or damaged, check disk space and permissions. Do not delete or replace its state file casually: that can defeat the spacing and a server's retry deadline. If a process crashes after receiving a 429 but before storing its retry header, the header cannot be recovered; the scheduler applies a fresh three-minute recovery wait.
+While an account waits, its last good usage may remain visible as stale. If scheduling or recovery reports an error, stop and investigate rather than deleting state or repeatedly retrying. cc-switcher does not automatically reauthenticate; an expired sign-in may require adding the account again.
 
 ### Usage unavailable or rate limited
 
-- "rate limited": either the token-refresh endpoint or the usage endpoint returned HTTP 429. Run `ccs usage <account>` for endpoint and retry details when available. cc-switcher respects the server's `Retry-After`, or uses exponential backoff if none was provided; the last good numbers remain marked stale. For example, a 429 with `Retry-After: 7200` at 10:00 means the next request is not before 12:00. Older cache entries do not identify the endpoint. Do not run `ccs list --refresh` in a loop.
+- "rate limited": a usage request may have returned HTTP 429. Run `ccs usage <account>` for retry details when available. For usage requests, cc-switcher respects the server's `Retry-After`, or uses exponential backoff if none was provided; the last good numbers remain marked stale. For example, a 429 with `Retry-After: 7200` at 10:00 means the next usage request is not before 12:00. Do not run `ccs list --refresh` in a loop. cc-switcher's usage and reset-status requests omit the User-Agent header, but Claude Code's child process may send its own. Neither approach guarantees identical rate limits or hides all client characteristics.
 - The menu bar reuses a successful sample less than 60 seconds old. For example, three refresh actions within nine seconds use one usage response; the old code made three requests. Explicit CLI refreshes still request fresh data, subject to backoff.
 - Redacted 429 diagnostics go to `~/Library/Logs/cc-switcher/menubar.err.log`: time, a hashed account reference, endpoint, status, allowlisted error type and retry wait. They never contain tokens, response bodies, or server free text. `ccs usage <account> --json` includes the same account reference when details are available.
 - "offline": no connection, or Anthropic could not be reached. It clears by itself once the network is back.
-- "token needs refresh": the active account's token has expired. cc-switcher never refreshes the live login (that would log out running sessions), so it waits for Claude Code to do it. Run any `claude` command, then `ccs usage --refresh`.
+- "token needs refresh": the active account's token has expired. cc-switcher does not directly refresh the live login; use Claude Code with that account, then retry usage. If the login cannot be renewed, sign-in again may be necessary.
 - "unexpected reply" or an HTTP error that does not go away: check for a cc-switcher update; Claude Code or Anthropic may have changed the endpoint.
 
 ### A running session still shows the old account
@@ -216,7 +253,7 @@ Claude Code keeps its login for that setup in a different Keychain item (`Claude
 
 The installer records the `claude` executable found in the installing shell, so the login item does not silently select a different version. For example, if the shell finds `/opt/homebrew/bin/claude` but launchd's PATH puts `~/.local/bin` first, the app keeps using the selected Homebrew path. To choose another installation, set `CC_SWITCHER_CLAUDE_PATH` to its absolute executable path before running the installer or `ccs agent install`. Reinstall the login item after changing it. A missing configured path is not silently replaced by another binary.
 
-This selects the executable for login, MCP setup and version detection; it does not make cc-switcher's own HTTP requests identical to Claude Code's.
+This selects the executable for login, isolated renewal, MCP setup and version detection. It does not make cc-switcher's own HTTP requests identical to Claude Code's.
 
 ### `ccs: command not found`
 
@@ -240,10 +277,11 @@ Run the same command with `CCS_DEBUG=1 ccs ...` to get the full traceback, and i
 
 ## Security model
 
-- **Tokens live only in the Keychain.** Your Claude login is stored by Claude Code in `Claude Code-credentials`. cc-switcher keeps one extra Keychain item per account, `cc-switcher:<accountUuid>:<orgUuid>`, holding that account's login and nothing else. Items are written through `/usr/bin/security` with the payload on stdin, not on the command line (except a payload too large for one line, which Claude Code itself also sends as an argument).
-- **Files hold metadata only.** `~/.config/cc-switcher` is `0700` and its files `0600`: email, organization, plan, label, usage numbers, settings, and the MCP profile. `ccs doctor` checks the permissions.
+- **Saved logins use the Keychain.** Your active Claude login is stored by Claude Code in `Claude Code-credentials`. cc-switcher keeps one extra Keychain item per account, `cc-switcher:<accountUuid>:<orgUuid>`, holding that account's login and nothing else. Items are written through `/usr/bin/security` with the payload on stdin, not on the command line (except a payload too large for one line, which Claude Code itself also sends as an argument).
+- **Protected recovery exception.** If Keychain fails during isolated renewal, Claude Code may write credentials in plaintext to a `0600` recovery file inside a private `0700` directory. It may persist to permit recovery. Treat it as secret; do not copy, share or casually delete it. Ordinary app metadata and usage files do not contain tokens.
+- **Private app data.** `~/.config/cc-switcher` is `0700` and its files `0600`: email, organization, plan, label, usage numbers, settings, and the MCP profile. `ccs doctor` checks the permissions.
 - **MCP tokens stay local.** A switch replaces only `claudeAiOauth` and attempts to preserve the other live-item fields. During a profile update, cc-switcher may temporarily retain and restore an MCP entry locally. `ccs mcp export` writes addresses and `${CCS_...}` placeholders, never token values.
-- **The live login is never refreshed by cc-switcher.** It is shared with your running Claude Code sessions; a refresh rotates the token and would sign them out. Saved logins of accounts that are not live are refreshed when they expire.
+- **The active login is managed by Claude Code.** cc-switcher does not directly refresh it. Only when experimental renewal is enabled and an inactive access token has expired does cc-switcher invoke a noninteractive Claude Code model request in a separate configuration and Keychain context; it does not automatically reauthenticate. The request consumes plan usage and may incur charges. This separation is not an OS sandbox, and managed policy may override child restrictions.
 - **No secrets in logs, errors or notifications.** Messages contain account names and percentages.
-- **Anthropic requests.** Usage and inactive-account token refreshes contact Anthropic's endpoints with the account's own token. These are undocumented client endpoints, not a supported compatibility guarantee: request handling, limits and response formats can change.
+- **Anthropic requests.** cc-switcher makes its own usage and reset-status requests, but no direct token-refresh POST. Claude Code handles OAuth internally and may send its own User-Agent. These are undocumented client endpoints, not a supported compatibility guarantee: request handling, limits and response formats can change.
 - **Uninstalling leaves Claude Code alone.** The uninstaller never deletes `Claude Code-credentials`.

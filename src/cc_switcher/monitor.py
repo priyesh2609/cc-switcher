@@ -40,7 +40,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from cc_switcher import fsutil, keychain, oauth, paths, refresh_schedule, store, tokens, usage
+from cc_switcher import claude_refresh, fsutil, keychain, oauth, paths, refresh_schedule, store, tokens, usage
 from cc_switcher.models import (
     Account,
     BreakdownRow,
@@ -85,6 +85,9 @@ ERROR_MESSAGES = {
     "no_credentials": "No saved login. Add the account again.",
     "token_stale": "Waiting for Claude Code to refresh this login.",
     "refresh_schedule_error": "Token refresh schedule unavailable; check disk space and app data permissions.",
+    "refresh_recovery_required": "Credential recovery required before changing accounts.",
+    "refresh_paused": "Automatic token refresh paused after an uncertain Claude Code failure.",
+    "refresh_disabled": "Automatic CLI renewal disabled; switch to this account and use Claude Code.",
     "auth_expired": "Sign-in expired. Add the account again.",
     "rate_limited": "Rate-limited by the usage endpoint; will retry shortly.",
     "network": "Could not reach Anthropic.",
@@ -625,6 +628,14 @@ def _refresh(
         return fail("no_credentials")
     except tokens.TokenStale:
         return fail("token_stale")
+    except claude_refresh.RecoveryRequired:
+        return fail("refresh_recovery_required")
+    except claude_refresh.NeedsLogin:
+        return fail("auth_expired")
+    except claude_refresh.RefreshDisabled:
+        return fail("refresh_disabled")
+    except claude_refresh.RefreshFailed:
+        return fail("refresh_paused")
     except refresh_schedule.RefreshQueued:
         return fail("refresh_queued")
     except refresh_schedule.ScheduleError:

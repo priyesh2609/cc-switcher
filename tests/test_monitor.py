@@ -16,6 +16,7 @@ from cc_switcher.models import (
     PromoCredit,
     UsageSnapshot,
     UsageWindow,
+    Settings,
     make_account_id,
 )
 
@@ -325,17 +326,33 @@ def test_refresh_account_uses_the_live_token_for_the_live_account(world):
     assert server.calls == ["sk-ant-oat01-fake-live-a"]
 
 
-def test_refresh_account_does_the_whole_chain_for_an_expired_saved_login(world):
-    put_saved(world, ACCT_B, make_login(ACCOUNT_B, "saved-b", EXPIRED_MS))
-    server = FakeUsageServer()
-    post = FakePost()
+def test_refresh_account_does_the_whole_chain_for_an_expired_saved_login(world, monkeypatch):
+    from cc_switcher import claude_refresh
 
-    snap = monitor.refresh_account(ACCT_B, http_post=post, opener=server)
+    store.save_settings(Settings(claude_refresh_enabled=True))
+
+    original = make_login(ACCOUNT_B, "saved-b", EXPIRED_MS)
+    put_saved(world, ACCT_B, original)
+    server = FakeUsageServer()
+    calls = []
+
+    def refresh_locked(account, login):
+        calls.append((account.id, login))
+        assert lock_is_held()
+        updated = dict(login, accessToken="sk-ant-oat01-REFRESHED",
+                       refreshToken="sk-ant-ort01-ROTATED", expiresAt=FAR_FUTURE_MS)
+        put_saved(world, account, updated)
+        return updated
+
+    monkeypatch.setattr(claude_refresh, "refresh_locked", refresh_locked)
+    snap = monitor.refresh_account(ACCT_B, http_post=ForbiddenPost(), opener=server)
 
     assert snap.ok
-    assert post.calls == 1
+    assert calls == [(ACCT_B.id, original)]
     assert server.calls == ["sk-ant-oat01-REFRESHED"]  # usage was fetched with the fresh token
-    assert world.get_json(ACCT_B.keychain_service)["claudeAiOauth"]["refreshToken"] == "sk-ant-ort01-ROTATED"
+    stored = world.get_json(ACCT_B.keychain_service)["claudeAiOauth"]
+    assert stored["refreshToken"] == "sk-ant-ort01-ROTATED"
+    assert stored["accountUuid"] == ACCOUNT_B[0] and stored["organizationUuid"] == ACCOUNT_B[1]
 
 
 def test_the_usage_request_is_made_outside_the_app_lock(world):
@@ -354,10 +371,10 @@ def test_the_usage_request_is_made_outside_the_app_lock(world):
     [
         ("no_saved_item", "no_credentials"),
         ("live_expired", "token_stale"),
-        ("refresh_rejected", "auth_expired"),
-        ("refresh_unreachable", "network"),
-        ("refresh_500", "http_500"),
-        ("refresh_429", "rate_limited"),
+        ("refresh_needs_login", "auth_expired"),
+        ("refresh_opaque_failure", "refresh_paused"),
+        ("refresh_retry_blocked", "refresh_paused"),
+        ("refresh_recovery_required", "refresh_recovery_required"),
         ("usage_401", "auth_expired"),
         ("usage_403", "auth_expired"),
         ("usage_429", "rate_limited"),
@@ -381,13 +398,21 @@ def test_every_failure_becomes_an_error_snapshot_and_nothing_raises(world, monke
     elif setup == "live_expired":
         put_live(world, make_login(ACCOUNT_B, "live-b", EXPIRED_MS))
     elif setup.startswith("refresh_"):
+        from cc_switcher import claude_refresh
+
+        store.save_settings(Settings(claude_refresh_enabled=True))
         put_saved(world, ACCT_B, make_login(ACCOUNT_B, "saved-b", EXPIRED_MS))
-        post = {
-            "refresh_rejected": FakePost(status=400, body={"error": "invalid_grant"}),
-            "refresh_unreachable": FakePost(raises=urllib.error.URLError("down")),
-            "refresh_500": FakePost(status=500, body="oops"),
-            "refresh_429": FakePost(status=429, body={"error": "rate_limit"}),
+        failure = {
+            "refresh_needs_login": claude_refresh.NeedsLogin,
+            "refresh_opaque_failure": claude_refresh.RefreshFailed,
+            "refresh_retry_blocked": claude_refresh.RetryBlocked,
+            "refresh_recovery_required": claude_refresh.RecoveryRequired,
         }[setup]
+
+        def fail_refresh(account, login):
+            raise failure("simulated isolated renewal failure")
+
+        monkeypatch.setattr(claude_refresh, "refresh_locked", fail_refresh)
     elif setup.startswith("usage_"):
         server.replies["sk-ant-oat01-fake-saved-b"] = {
             "usage_401": http_error(401),
@@ -421,6 +446,8 @@ def test_every_failure_becomes_an_error_snapshot_and_nothing_raises(world, monke
     assert (snap.ok, snap.error) == (False, expected)
     assert snap.account_id == ACCT_B.id
     assert snap.windows == () and snap.raw is None
+    if setup.startswith("refresh_"):
+        assert server.calls == [] and server.resets_calls == []
 
 
 def test_error_snapshots_never_contain_tokens(world):
@@ -586,30 +613,35 @@ def backoff_row(account=ACCT_B):
     return read_cache_file()["backoff"].get(account.id)
 
 
-def test_oauth_429_keeps_server_retry_after_and_diagnostic_stage(world, monkeypatch, caplog):
-    """An OAuth 429 for 2h must not retry at 1h or be mistaken for a usage 429."""
+def test_opaque_cli_failure_keeps_stale_usage_without_inventing_429_details(world, monkeypatch, caplog):
+    from cc_switcher import claude_refresh
+
+    store.save_settings(Settings(claude_refresh_enabled=True))
+
+    old = usage.parse_usage(usage_payload(session=37.0), ACCT_B.id, fetched_at=T0)
+    monitor.save_cache({ACCT_B.id: old})
     put_saved(world, ACCT_B, make_login(ACCOUNT_B, "saved-b", EXPIRED_MS))
     secret = "sk-ant-ort01-fake-saved-b"
-    def reject(request, timeout):
-        raise urllib.error.HTTPError(
-            request.full_url, 429, "Too Many Requests", {"Retry-After": "7200"},
-            io.BytesIO(json.dumps({"error": {"type": "rate_limit_error", "message": secret}}).encode()),
-        )
-    monkeypatch.setattr("urllib.request.urlopen", reject)
+    calls = []
+
+    def fail_refresh(account, login):
+        calls.append(account.id)
+        raise claude_refresh.RefreshFailed(secret)
+
+    monkeypatch.setattr(claude_refresh, "refresh_locked", fail_refresh)
     server = FakeUsageServer()
     with caplog.at_level("WARNING"):
-        result = monitor.refresh_all([ACCT_B], opener=server, delay_between=0, now=T0)
-    assert result[ACCT_B.id].error == "rate_limited"
-    assert backoff_row()["next_allowed_at"] == (T0 + timedelta(hours=2)).isoformat()
-    assert backoff_row()["endpoint"] == "oauth_token"
-    details = monitor.cache_status(ACCT_B.id, now=T0)["rate_limit"]
-    assert details["endpoint"] == "oauth_token"
-    assert details["server_error"] == "rate_limit_error"
-    assert details["retry_after_seconds"] == 7200
-    assert details["next_allowed_at"] == (T0 + timedelta(hours=2)).isoformat()
-    assert server.calls == []
-    assert "oauth_token" in caplog.text and "429" in caplog.text
+        result = monitor.refresh_all([ACCT_B], http_post=ForbiddenPost(), opener=server,
+                                     delay_between=0, now=T0 + timedelta(minutes=5))
+    entry = monitor.cache_status(ACCT_B.id, now=T0 + timedelta(minutes=5))
+    assert calls == [ACCT_B.id]
+    assert result[ACCT_B.id] == old and entry["snapshot"] == old
+    assert entry["stale"] and entry["last_error"] == "refresh_paused"
+    assert entry["age_seconds"] == 300
+    assert backoff_row() is None and "rate_limit" not in entry
+    assert server.calls == [] and server.resets_calls == []
     assert secret not in caplog.text
+    assert secret not in json.dumps(entry, default=str)
 
 
 @pytest.mark.parametrize("endpoint, server_error", [([], None), ({}, None), ("oauth_token", []), ("usage", {})])

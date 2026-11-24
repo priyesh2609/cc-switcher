@@ -713,9 +713,11 @@ def test_keyboard_interrupt_exits_130(world, monkeypatch, capsys):
 def test_settings_lists_shows_and_sets(world, capsys):
     code, out, _ = run(["settings"], capsys)
     assert code == 0
-    assert "poll_interval_seconds = 300" in out
-    assert "alert_thresholds      = 80,95,100" in out
-    assert "auto_switch_enabled   = false" in out
+    displayed = {key.strip(): value.strip() for key, value in (line.split("=", 1) for line in out.splitlines())}
+    assert displayed["poll_interval_seconds"] == "300"
+    assert displayed["alert_thresholds"] == "80,95,100"
+    assert displayed["auto_switch_enabled"] == "false"
+    assert displayed["claude_refresh_enabled"] == "false"
 
     assert run(["settings", "menubar_title"], capsys)[1].strip() == "session"
 

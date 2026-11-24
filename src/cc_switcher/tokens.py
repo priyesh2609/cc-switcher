@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Seconds before expiry at which a token is considered unusable / due for refresh.
 LIVE_SKEW_SECONDS = 30  # only avoids using a token that dies mid-request
-SAVED_SKEW_SECONDS = 300
+SAVED_SKEW_SECONDS = 30
 
 
 class NoCredentials(RuntimeError):
@@ -186,13 +186,14 @@ def access_token_for(
 ) -> str:
     """Return an access token for ``account``.
 
-    Raises ``NoCredentials`` (nothing usable saved), ``TokenStale`` (live login expired; never
-    refreshed here), ``oauth.RefreshRejected`` (saved login can no longer be refreshed: re-add the
-    account), ``oauth.OAuthError`` (transient), ``LiveLoginUnreadable`` (a refresh is due but the
-    live item can't be parsed, so the account might be live), ``keychain.KeychainError`` and
-    ``fsutil.LockTimeout``.
+    The optional legacy ``http_post`` argument is ignored; OAuth refreshes are performed only
+    by the isolated Claude CLI engine. The engine raises its own recovery and refresh errors.
     """
+    from cc_switcher import claude_refresh
+
     with fsutil.app_lock():
+        claude_refresh.guard_locked()
+        claude_refresh.guard_no_login_locked()
         live = _live_login()
         known_live = live if isinstance(live, dict) else None
         if known_live is not None and creds.login_account_id(known_live) == account.id:
@@ -221,62 +222,51 @@ def access_token_for(
                 "Run `claude` and use /login."
             )
 
-        post_attempted = False
-        post_response = None
+        refresh_token = login.get("refreshToken")
+        if not isinstance(refresh_token, str) or not refresh_token:
+            raise claude_refresh.NeedsLogin("The saved login has no refresh token; sign in again.")
+        if store.load_settings().claude_refresh_enabled is not True:
+            raise claude_refresh.RefreshDisabled("Automatic CLI renewal is disabled; enable the trusted-CLI experiment explicitly.")
+        claude_refresh.guard_retry_locked(account, login)
+        registered = store.load_accounts()
+        by_ref = {refresh_schedule._reference(item.id): item for item in registered}
+        current_registered = account.id in {item.id for item in registered}
 
-        def scheduled_post(url, payload, *, headers, timeout):
-            nonlocal post_attempted, post_response
-            # oauth validates the refresh token and builds the request before reaching here.
-            # The existing lock protects both the reservation and the actual POST.
-            registered = store.load_accounts()
-            by_ref = {refresh_schedule._reference(item.id): item for item in registered}
-            current_registered = account.id in {item.id for item in registered}
-
-            def still_eligible(ref: str) -> bool:
-                # Public callers normally use registry accounts. Preserve the existing
-                # behavior for direct callers with an unregistered Account object.
-                if not current_registered:
-                    return True
-                other = by_ref.get(ref)
-                if other is None:
-                    return False
-                if known_live is not None and creds.login_account_id(known_live) == other.id:
-                    return False
-                try:
-                    other_login = _saved_login(other)
-                except (NoCredentials, keychain.KeychainError):
-                    return False  # no POST possible now; it may rejoin on a later poll
-                if (known_live is not None and other_login.get("refreshToken")
-                        and other_login.get("refreshToken") == known_live.get("refreshToken")):
-                    return False
-                return bool(other_login.get("refreshToken")) and oauth.is_expired(
-                    other_login, skew_seconds=SAVED_SKEW_SECONDS, now_ms=now_ms
-                )
-
-            refresh_schedule.reserve(account.id, is_eligible=still_eligible)
-            post_attempted = True
-            post_response = (http_post or oauth._default_http_post)(url, payload, headers=headers, timeout=timeout)
-            return post_response
-
-        try:
-            refreshed = oauth.refresh_login(login, http_post=scheduled_post, now_ms=now_ms)
+        def still_eligible(ref: str) -> bool:
+            if not current_registered:
+                return True
+            other = by_ref.get(ref)
+            if other is None:
+                return False
+            if known_live is not None and creds.login_account_id(known_live) == other.id:
+                return False
             try:
-                _persist(account, refreshed)
-            except Exception:
-                # The server may already have revoked the old token; keep the replacement
-                # even if an unexpected write error prevents confirming it in Keychain.
-                _UNSAVED[account.id] = (login.get("refreshToken"), refreshed)
-                logger.warning("Refreshed login for account %s could not be saved; kept in memory", account.id)
-                raise
+                other_login = _saved_login(other)
+            except (NoCredentials, keychain.KeychainError):
+                return False
+            if (known_live is not None and other_login.get("refreshToken")
+                    and other_login.get("refreshToken") == known_live.get("refreshToken")):
+                return False
+            if not other_login.get("refreshToken") or not oauth.is_expired(
+                other_login, skew_seconds=SAVED_SKEW_SECONDS, now_ms=now_ms
+            ):
+                return False
+            try:
+                claude_refresh.guard_retry_locked(other, other_login)
+            except claude_refresh.RetryBlocked:
+                return False
+            return True
+
+        refresh_schedule.reserve(account.id, is_eligible=still_eligible)
+        try:
+            # The engine returns only after verifying the saved successor, and leaves a
+            # durable block when the child's result or retry deadline is uncertain.
+            refreshed = claude_refresh.refresh_locked(account, login)
             logger.info("Refreshed saved login for account %s", account.id)
             return refreshed["accessToken"]
         finally:
-            if post_attempted:
-                try:
-                    # Completion runs after saving or retaining rotated credentials, but
-                    # still under the lock. A 429's Retry-After is persisted here too.
-                    refresh_schedule.complete(account.id, post_response)
-                except Exception:
-                    # Leave the in-flight marker for conservative recovery; scheduling
-                    # errors must never discard a successfully rotated credential.
-                    logger.warning("Could not finish token refresh scheduling metadata")
+            try:
+                # This spaces child invocations, not requests internal to Claude CLI.
+                refresh_schedule.complete(account.id)
+            except Exception:
+                logger.warning("Could not finish token refresh scheduling metadata")

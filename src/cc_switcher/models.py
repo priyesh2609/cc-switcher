@@ -66,6 +66,8 @@ class Account:
 class Settings:
     poll_interval_seconds: int = 300
     notifications_enabled: bool = True
+    # Opt in only on trusted CLI installations: child hooks/retries are Claude-owned.
+    claude_refresh_enabled: bool = False
     # Notify once each time a window crosses one of these percentages.
     alert_thresholds: list[int] = field(default_factory=lambda: [80, 95, 100])
     auto_switch_enabled: bool = False

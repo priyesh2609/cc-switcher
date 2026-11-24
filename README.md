@@ -17,23 +17,23 @@ One thing it cannot fix: claude.ai connectors (the `claude.ai Slack` kind) belon
 - **Switching that keeps MCP sign-ins.** Only the Claude login is swapped; the MCP tokens never move.
 - **One-click or one-command.** Click an account in the menu bar, or run `ccs switch work` / `ccs next`.
 - **Usage for every saved account.** Session (5h) and weekly percentages, per-model weekly limits, reset times, extra-usage credits remaining out of the monthly limit, and promo credits.
-- **Spaced token refreshes.** cc-switcher queues OAuth token-refresh attempts at least three minutes apart across its processes. Usage checks using valid tokens remain independent.
+- **Experimental inactive-account renewal, opt-in.** When enabled and an inactive account's access token has expired, cc-switcher invokes a noninteractive Claude Code model request in a separate configuration and Keychain context. The request consumes plan usage and may incur charges. The feature is off by default.
 - **Redeemable limit resets.** How many you have left on each account and when they expire, shown next to the usage. cc-switcher only displays them: you spend one inside Claude Code with the `/limit-reset` command, and cc-switcher never spends one for you.
-- **Honest about data age.** Every number shows how old it is. If a refresh fails (rate limit, offline) the last good numbers stay on screen, marked `~` and "stale", instead of turning into an error. Numbers that are too old are ignored when choosing an account to switch to.
+- **Honest about data age.** Usage numbers show their age. If a transient refresh fails (for example, rate limit or offline), the last good numbers stay on screen, marked `~` and "stale"; an unusable login can instead show an error. Numbers that are too old are ignored when choosing an account to switch to.
 - **Alerts.** A notification when a window crosses 80%, 95% and 100% (configurable), when a window resets, and when an account needs to sign in again.
 - **Optional auto-switch.** Off by default. When on, it moves to the account with the most room once the active one reaches your threshold, with a 10-minute cooldown, and tells you what it did.
 - **A fixed MCP set per Mac.** `ccs mcp export` / `apply` carries your user-scope servers between Macs, and `ccs mcp status` shows which are signed in.
-- **Keychain-backed logins.** Saved tokens stay in the Keychain. cc-switcher does not refresh the active login, reducing interference with running Claude Code sessions.
+- **Keychain-backed logins.** Saved logins are stored in the Keychain. If Keychain fails during isolated renewal, a protected plaintext recovery file may retain credentials; see [Security](#security). cc-switcher does not directly refresh the active login.
 - **`ccs doctor`.** Checks the whole setup and prints a fix for anything that is wrong.
 
 ## Requirements
 
-macOS 12 or later, Claude Code, and an internet connection. The installer sets up everything else (uv and Python 3.12).
+macOS 12 or later, a recent Claude Code installation, and an internet connection. The experimental renewal implementation was checked against Claude Code 2.1.330. The installer sets up everything else (uv and Python 3.12).
 
 ## Quick start
 
 ```bash
-git clone <your-repo-url> cc-switcher
+git clone --branch main https://github.com/priyesh2609/cc-switcher.git
 cd cc-switcher
 scripts/install.sh
 ```
@@ -46,7 +46,13 @@ ccs list                     # all accounts with usage
 ccs switch personal          # or click it in the menu bar
 ```
 
-Full steps, other Macs, updating and troubleshooting: [docs/INSTALL.md](docs/INSTALL.md).
+Experimental CLI-driven renewal is off by default. To enable it on a trusted installation:
+
+```bash
+ccs settings claude_refresh_enabled true
+```
+
+To disable it again, run `ccs settings claude_refresh_enabled false`. When disabled, an expired inactive login cannot be renewed by cc-switcher; its last good usage may become stale until the login is renewed. Full steps, other Macs, costs and troubleshooting: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Commands
 
@@ -97,7 +103,7 @@ macOS Keychain
 ├── oauthAccount                         who you are (email, org); replaced on a switch
 └── mcpServers                           user-scope MCP servers; cc-switcher only reads this
 
-~/.config/cc-switcher/                   0700; files 0600; no tokens
+~/.config/cc-switcher/                   private app data; see recovery exception below
 ├── accounts.json                        email, org, plan, label per account
 ├── settings.json
 ├── usage-cache.json, usage-history.jsonl
@@ -115,12 +121,18 @@ The Keychain interface has no compare-and-swap shared with Claude Code. If Claud
 
 "Which account is active" is worked out from the live login's account and organization ids, so signing in with `/login` inside Claude Code is noticed by the next refresh. A new `claude` session reads the current login; a running session may keep its previous login until restarted.
 
-Usage comes from the same endpoint Claude Code currently uses, but cc-switcher makes its own requests. These endpoints are undocumented client internals; matching the request format does not guarantee identical backend treatment or future compatibility. For the active account cc-switcher uses the live token without refreshing it. Other accounts' saved logins are refreshed when they expire.
+Usage comes from the same endpoint Claude Code currently uses, but cc-switcher makes its own requests. Its usage and reset-status requests omit the User-Agent header and do not explicitly send a Python version. Intermediaries and TLS can still expose client characteristics. These endpoints are undocumented client internals; matching the request format does not guarantee identical backend treatment or future compatibility.
+
+In version 0.2.0, experimental CLI-driven renewal is off by default. When explicitly enabled, only an expired inactive login triggers a noninteractive Claude Code model request in a separate configuration and Keychain context; valid access tokens still serve usage GETs without starting a child. The request asks Haiku, at low effort, `Reply with OK only.` and sets a $0.10 CLI budget limit. It consumes plan usage and may incur charges. cc-switcher makes no direct token-refresh POST; Claude Code handles OAuth internally and may send its own User-Agent.
+
+cc-switcher waits at least three minutes after one invocation completes before another starts; a later poll may add more delay. It cannot control Claude Code's internal retries and cannot guarantee identical rate limits or server treatment. Tools, MCP, and user/project settings and hooks are disabled where supported, but managed policy may override this. This is not an OS sandbox; enable it only for a trusted Claude Code installation and environment.
+
+The active login remains managed by Claude Code, and cc-switcher does not automatically reauthenticate an account. An opaque failure after the child has been reaped and the successor safely saved pauses automatic retries for that account until its refresh grant changes, for example through sign-in or native rotation. If the child or credentials remain ambiguous, recovery material and a journal persist and block credential mutations; do not delete them or retry blindly. Last good usage may remain visible as stale; an unusable login may need sign-in again.
 
 ## Security
 
-- Tokens are persisted in the Keychain, written through `/usr/bin/security` like Claude Code does. Tokens are also held in process memory while in use. No token goes in an app data file, log, notification or error message.
-- The app folder is `0700`, its files `0600`, and they hold metadata only.
+- Saved logins are stored in the Keychain and tokens are held in process memory while in use. If Keychain fails during isolated renewal, Claude Code may write credentials to a plaintext recovery file with `0600` permissions inside a private `0700` directory. This file may persist to permit recovery; do not copy, share or casually delete it.
+- The app data folder is `0700` and its files are `0600`. Ordinary metadata and usage files do not contain tokens; the protected recovery file is an exception and must be treated as secret. A separate marker prevents isolated renewal during `ccs add`; an abandoned marker after a crash may require help.
 - Account switching leaves MCP token entries in the live Keychain item; profile updates may temporarily retain and restore an entry locally. `ccs mcp export` writes server addresses and placeholders, never secrets.
 - cc-switcher never deletes `Claude Code-credentials`. The uninstaller removes only `cc-switcher:*` items, and only with `--purge`.
 

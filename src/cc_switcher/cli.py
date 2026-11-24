@@ -172,6 +172,12 @@ def error_text(code: str | None) -> str:
         return "token refresh queued — retrying on a later poll"
     if code == "refresh_schedule_error":
         return "token refresh schedule unavailable — check disk space and app data permissions; seek help before changing a damaged schedule"
+    if code == "refresh_recovery_required":
+        return "credential recovery required — stop and seek help before changing the isolated login files"
+    if code == "refresh_paused":
+        return "automatic token refresh paused — check Claude Code and account sign-in before retrying"
+    if code == "refresh_disabled":
+        return "automatic CLI renewal disabled — switch to this account and use Claude Code, or opt in to experimental renewal"
     if code == "network":
         return "couldn't reach Anthropic — check your internet connection"
     if code == "keychain_error":
@@ -197,6 +203,9 @@ def short_error_text(code: str | None) -> str:
         "rate_limited": "rate limited",
         "refresh_queued": "token refresh queued",
         "refresh_schedule_error": "token refresh schedule error",
+        "refresh_recovery_required": "credential recovery required",
+        "refresh_paused": "automatic refresh paused",
+        "refresh_disabled": "automatic renewal disabled",
         "network": "offline",
         "bad_response": "bad response",
         "keychain_error": "Keychain locked",
@@ -916,6 +925,9 @@ def cmd_settings(args: argparse.Namespace) -> int:
         setattr(settings, key, new_value)
         store.save_settings(settings)
     print(f"{key} = {_format_setting(new_value)}")
+    if key == "claude_refresh_enabled" and new_value:
+        print("Experimental: Claude requests consume usage; use only trusted CLI installations.")
+        print("Managed hooks and CLI-internal retries are outside CCS's control; private credential recovery files may persist.")
     print("The menu bar app picks this up within a minute.")
     return EXIT_OK
 

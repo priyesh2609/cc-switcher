@@ -19,8 +19,6 @@ from pathlib import Path
 # Claude Code's own constants (verified against Claude Code 2.1.330).
 CLAUDE_KEYCHAIN_BASE = "Claude Code"
 CLAUDE_KEYCHAIN_SUFFIX = "-credentials"
-OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_BETA_HEADER = "oauth-2025-04-20"
 

@@ -155,7 +155,7 @@ def test_fetch_sends_the_documented_request_and_returns_the_json():
     headers = {k.lower(): v for k, v in request.header_items()}
     assert headers["authorization"] == f"Bearer {TOKEN}"
     assert headers["anthropic-beta"] == "oauth-2025-04-20"
-    assert headers["user-agent"] == "claude-code/2.1.330"
+    assert "user-agent" not in headers
     assert opener.timeouts == [4]
     assert response.closed
 
@@ -179,14 +179,14 @@ def test_fetch_accepts_text_bodies_and_getcode_responses():
     assert usage.fetch_usage_raw(TOKEN, opener=lambda request, timeout=None: Legacy()) == {"ok": 1}
 
 
-def test_fetch_defaults_to_urllib_urlopen(monkeypatch):
+def test_fetch_defaults_to_no_user_agent_transport(monkeypatch):
     seen = []
 
     def fake_urlopen(request, timeout):
         seen.append(request.full_url)
         return FakeResponse(b"{}")
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("cc_switcher.http_transport.open_without_user_agent", fake_urlopen)
     assert usage.fetch_usage_raw(TOKEN) == {}
     assert seen == ["https://api.anthropic.com/api/oauth/usage"]
 
@@ -1053,7 +1053,7 @@ def test_fetch_resets_is_a_read_only_get_of_the_documented_url():
     headers = {k.lower(): v for k, v in request.header_items()}
     assert headers["authorization"] == f"Bearer {TOKEN}"
     assert headers["anthropic-beta"] == "oauth-2025-04-20"
-    assert headers["user-agent"] == "claude-code/2.1.330"
+    assert "user-agent" not in headers
     assert opener.timeouts == [3]
 
 
