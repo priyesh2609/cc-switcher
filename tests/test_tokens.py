@@ -23,12 +23,12 @@ def _no_real_version_probe(monkeypatch):
 
     store.save_settings(Settings(claude_refresh_enabled=True))
     monkeypatch.setattr(usage, "_version_cache", "2.1.330")
-    monkeypatch.setattr(cc_switcher, "claude_refresh", SimpleNamespace(
-        guard_locked=lambda: None,
-        guard_no_login_locked=lambda: None,
-        guard_retry_locked=lambda account, login: None,
-        refresh_locked=lambda account, login: pytest.fail("unexpected CLI refresh"),
-    ), raising=False)
+    from cc_switcher import claude_refresh
+
+    monkeypatch.setattr(claude_refresh, "guard_locked", lambda: None)
+    monkeypatch.setattr(claude_refresh, "guard_no_login_locked", lambda: None)
+    monkeypatch.setattr(claude_refresh, "guard_retry_locked", lambda account, login: None)
+    monkeypatch.setattr(claude_refresh, "refresh_locked", lambda account, login: pytest.fail("unexpected CLI refresh"))
 
 
 def account_for(ident, email="a@example.com") -> Account:

@@ -1453,6 +1453,19 @@ def test_save_active_login_reports_a_save_that_did_not_stick(w, monkeypatch):
         switcher.save_active_login()
 
 
+@pytest.mark.parametrize("updates", [{"accessToken": "new-access"}, {"expiresAt": 4102444860000}])
+def test_outgoing_save_is_verified_even_when_refresh_token_is_unchanged(w, monkeypatch, updates):
+    w.register(w.s.ACCOUNT_A, "a@example.com", token="A1")
+    target = w.register(w.s.ACCOUNT_B, "b@example.com")
+    login = dict(w.s.make_login(w.s.ACCOUNT_A, "A1"), **updates)
+    w.set_live(w.live_blob(login))
+    before = w.live_raw()
+    _saved_writes_silently_ignored(w, monkeypatch)
+    with pytest.raises(switcher.SwitchError, match="nothing was changed"):
+        switcher.switch_to(target.id)
+    assert w.live_raw() == before
+
+
 def test_import_reports_a_save_that_did_not_stick(w, monkeypatch):
     w.set_live(w.live_blob(w.s.make_login(w.s.ACCOUNT_A)))
     w.set_claude_json({"oauthAccount": w.oauth_a})

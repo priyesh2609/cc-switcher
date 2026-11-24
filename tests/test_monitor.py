@@ -89,8 +89,8 @@ class FakeResponse:
     def __init__(self, body: bytes, status=200):
         self._body, self.status = body, status
 
-    def read(self):
-        return self._body
+    def read(self, size=-1):
+        return self._body if size < 0 else self._body[:size]
 
     def close(self):
         pass
@@ -2724,3 +2724,133 @@ def test_cache_rows_missing_a_label_fall_back_to_a_readable_one_not_the_raw_key(
         ("juniper_tide", "Kept as stored"),
     ]
     assert snap.promos[0].label == "Wattle Ember"
+
+
+@pytest.mark.parametrize("older_error", [None, "network", "auth_expired"])
+def test_older_poll_cannot_replace_newer_usage_or_mark_it_failed(older_error):
+    newer = good_snap(session=90, when=T0 + 2 * MIN)
+    monitor.save_cache({ACCT_B.id: newer})
+    older = (UsageSnapshot(ACCT_B.id, T0, ok=False, error=older_error)
+             if older_error else good_snap(session=10, when=T0))
+    monitor.save_cache({ACCT_B.id: older})
+    assert monitor.load_cache()[ACCT_B.id] == newer
+    assert monitor.cache_status(ACCT_B.id)["last_error"] is None
+
+
+def test_older_failure_does_not_replace_a_newer_failure_reason():
+    monitor.save_cache({ACCT_B.id: good_snap()})
+    monitor.save_cache({ACCT_B.id: UsageSnapshot(ACCT_B.id, T0 + 2 * MIN, ok=False, error="rate_limited")})
+    monitor.save_cache({ACCT_B.id: UsageSnapshot(ACCT_B.id, T0 + MIN, ok=False, error="network")})
+    assert monitor.cache_status(ACCT_B.id)["last_error"] == "rate_limited"
+
+
+@pytest.mark.parametrize("older_error", [None, "rate_limited"])
+def test_overlapping_poll_does_not_erase_a_newer_retry_deadline(world, monkeypatch, older_error):
+    new_snapshot = UsageSnapshot(ACCT_B.id, T0 + MIN, ok=False, error="rate_limited")
+    deadline = T0 + timedelta(hours=1)
+
+    def fetch(*args, **kwargs):
+        state = monitor._read_state()
+        monitor._merge_attempt(state, ACCT_B.id, new_snapshot)
+        state["backoff"][ACCT_B.id] = {"failures": 1, "endpoint": "usage", "next_allowed_at": deadline.isoformat()}
+        state["resets_cache"][ACCT_B.id] = {"fetched_at": (T0 + MIN).isoformat(), "next_check_at": deadline.isoformat(), "status": None}
+        monitor._write_state(state)
+        older = (UsageSnapshot(ACCT_B.id, T0, ok=False, error=older_error)
+                 if older_error else good_snap(when=T0))
+        row = {"fetched_at": T0.isoformat(), "next_check_at": (T0 + 30 * MIN).isoformat(), "status": None}
+        return monitor._Outcome(older, 60 if older_error else None, row, "usage" if older_error else None)
+
+    monkeypatch.setattr(monitor, "_refresh", fetch)
+    monitor.refresh_all([ACCT_B], delay_between=0, now=T0)
+    state = read_cache_file()
+    assert state["backoff"][ACCT_B.id]["next_allowed_at"] == deadline.isoformat()
+    assert state["resets_cache"][ACCT_B.id]["next_check_at"] == deadline.isoformat()
+    assert state["errors"][ACCT_B.id]["last_error"] == "rate_limited"
+
+
+@pytest.mark.parametrize("failures", ["broken", [], -10, 1000])
+def test_malformed_backoff_count_cannot_abort_a_rate_limited_poll(world, failures):
+    state = monitor._empty_state()
+    state["backoff"][ACCT_B.id] = {"failures": failures}
+    monitor._write_state(state)
+    result = monitor.refresh_all([ACCT_B], opener=rate_limited_server(), delay_between=0, now=T0)
+    assert result[ACCT_B.id].error == "rate_limited"
+    assert 60 <= (datetime.fromisoformat(backoff_row()["next_allowed_at"]) - T0).total_seconds() <= 3600
+
+
+def test_rate_limit_is_published_before_a_later_account_can_delay_the_poll(world):
+    server = rate_limited_server(3600)
+
+    def check_deadline_before_account_a():
+        if server.calls == [TOKEN_B]:
+            assert backoff_row()["next_allowed_at"] == (T0 + 60 * MIN).isoformat()
+
+    server.on_call = check_deadline_before_account_a
+    result = monitor.refresh_all([ACCT_B, ACCT_A], opener=server, delay_between=0, now=T0)
+    assert result[ACCT_A.id].ok
+
+
+def test_deadline_written_during_inter_account_delay_is_honored(world):
+    server = FakeUsageServer()
+
+    def delay(_seconds):
+        state = monitor._read_state()
+        state["backoff"][ACCT_B.id] = {"failures": 1, "next_allowed_at": (T0 + 60 * MIN).isoformat()}
+        monitor._write_state(state)
+
+    monitor.refresh_all([ACCT_A, ACCT_B], opener=server, delay_between=1, sleep=delay, now=T0)
+    assert server.calls == [TOKEN_A]
+
+
+def test_later_accounts_respect_a_retry_deadline_written_during_this_poll(world):
+    server = FakeUsageServer()
+
+    def another_poll_was_limited():
+        state = monitor._read_state()
+        state["backoff"][ACCT_B.id] = {"failures": 1, "next_allowed_at": (T0 + 60 * MIN).isoformat()}
+        monitor._write_state(state)
+
+    server.on_call = another_poll_was_limited
+    result = monitor.refresh_all([ACCT_A, ACCT_B], opener=server, delay_between=0, now=T0)
+    assert server.calls == [TOKEN_A]
+    assert result[ACCT_B.id].error == "rate_limited"
+
+
+def test_oversized_numeric_retry_metadata_does_not_break_cache_status():
+    state = monitor._empty_state()
+    monitor._merge_attempt(state, ACCT_B.id, UsageSnapshot(ACCT_B.id, T0, ok=False, error="rate_limited"))
+    state["backoff"][ACCT_B.id] = {"endpoint": "usage", "retry_after_seconds": 10**400}
+    monitor._write_state(state)
+    assert monitor.cache_status(ACCT_B.id)["rate_limit"]["retry_after_seconds"] is None
+
+
+def test_backoff_exponent_is_capped_before_power_allocation():
+    class CheckedExponent(int):
+        def __rpow__(self, base):
+            assert self <= 6, "unbounded exponent allocation happens before the 1-hour cap"
+            return base ** int(self)
+
+    class CheckedCount(int):
+        def __sub__(self, other):
+            return CheckedExponent(int(self) - other)
+
+    assert monitor._backoff_seconds(None, CheckedCount(1000)) == 3600
+
+
+@pytest.mark.parametrize("content", [b"\xff", b"[" * 20000])
+def test_unreadable_usage_cache_does_not_abort_monitoring(world, content):
+    fsutil.ensure_private_dir(paths.app_dir())
+    paths.usage_cache_file().write_bytes(content)
+    result = monitor.refresh_all([ACCT_B], opener=FakeUsageServer(), delay_between=0, now=T0)
+    assert result[ACCT_B.id].ok
+
+
+def test_full_poll_does_not_restore_cache_for_an_account_removed_in_flight(world, monkeypatch):
+    def fetch(account, **kwargs):
+        if account.id == ACCT_A.id:
+            store.remove_account(ACCT_B.id)
+        return monitor._Outcome(good_snap(account))
+
+    monkeypatch.setattr(monitor, "_refresh", fetch)
+    monitor.refresh_all(delay_between=0, now=T0)
+    assert ACCT_B.id not in read_cache_file()["snapshots"]

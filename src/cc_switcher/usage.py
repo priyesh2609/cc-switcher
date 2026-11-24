@@ -7,7 +7,7 @@ fields (``cinder_cove``, ``wattle_ember`` ...) without notice.
 
 ``opener`` contract (injectable, default = CCS's urllib opener without a User-Agent):
 either a callable ``opener(request, timeout=...)`` or an object with ``.open(request, timeout=...)``,
-returning a response with ``.read()`` (and optionally ``.status``/``.getcode()``/``.close()``).
+returning a response with ``.read(size)`` (and optionally ``.status``/``.getcode()``/``.close()``).
 HTTP error statuses are signalled the way urllib does it: by raising ``urllib.error.HTTPError``.
 """
 
@@ -220,7 +220,7 @@ def _get_json(url: str, access_token: str, *, opener: Any, timeout: float) -> di
         status = getattr(response, "status", None)
         if status is None and hasattr(response, "getcode"):
             status = response.getcode()
-        body = response.read()
+        body = response.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
         try:
             error_body = exc.read(8192) if exc.code == 429 else None
@@ -277,14 +277,14 @@ def _num(value: Any) -> float | None:
     """A finite float from int/float/numeric string, else None (bool is not a number here)."""
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
-        number = float(value)
-    elif isinstance(value, str):
-        try:
+    try:
+        if isinstance(value, (int, float)):
+            number = float(value)
+        elif isinstance(value, str):
             number = float(value.strip().rstrip("%"))
-        except ValueError:
+        else:
             return None
-    else:
+    except (ValueError, OverflowError):
         return None
     return number if math.isfinite(number) else None
 

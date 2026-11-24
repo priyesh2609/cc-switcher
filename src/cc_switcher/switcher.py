@@ -717,7 +717,7 @@ def _write_saved_login(account_id: str, login: dict[str, Any]) -> bool:
     keychain.write(service, acct_attr, creds.dump_blob(wanted))
     # `security -i` can exit 0 without storing anything: read it back before relying on it.
     stored = _read_saved_login(account_id)
-    if stored is None or stored.get("refreshToken") != login.get("refreshToken"):
+    if stored != login:
         raise keychain.KeychainError("Keychain didn't keep the saved login (is the login keychain locked?)")
     return True
 

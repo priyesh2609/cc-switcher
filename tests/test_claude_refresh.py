@@ -711,3 +711,41 @@ def test_oversized_successor_stays_in_isolation_not_ccs_argv(setup, monkeypatch,
         engine.refresh_locked(account, old)
     assert fake_keychain.get_json(created[0]) == {"claudeAiOauth": huge}
     assert journal().exists()
+
+
+def test_private_json_fifo_is_rejected_without_waiting_for_a_writer(setup, monkeypatch, tmp_path):
+    import os
+
+    engine, _, _ = setup
+    fifo = tmp_path / "credentials.fifo"
+    os.mkfifo(fifo, 0o600)
+    real_open = os.open
+
+    def no_blocking_fifo(path, flags, *args, **kwargs):
+        if Path(path) == fifo:
+            assert flags & os.O_NONBLOCK, "opening this FIFO would hang with the global credential lock held"
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", no_blocking_fifo)
+    with pytest.raises(engine.RecoveryRequired):
+        engine._read_private_json(fifo)
+
+
+def test_rotation_preserves_the_saved_keychain_account_attribute(setup, monkeypatch, fake_keychain, samples):
+    engine, account, old = setup
+    fake_keychain.put_json(account.keychain_service, creds.saved_item(old), account="previous-user")
+    successor = samples.make_login(samples.ACCOUNT_A, "rotated")
+    spawn(monkeypatch, lambda args, kw: fake_keychain.put_json(isolated_service(kw), creds.saved_item(successor)))
+    with fsutil.app_lock():
+        assert engine.refresh_locked(account, old) == successor
+    assert fake_keychain.read_account_attr(account.keychain_service) == "previous-user"
+
+
+@pytest.mark.parametrize("access", [" ", "token\r\nInjected: yes", "non-ascii-é"])
+def test_cli_success_with_an_unusable_bearer_is_not_success(setup, monkeypatch, fake_keychain, samples, access):
+    engine, account, old = setup
+    successor = dict(samples.make_login(samples.ACCOUNT_A, "rotated"), accessToken=access)
+    spawn(monkeypatch, lambda args, kw: fake_keychain.put_json(isolated_service(kw), creds.saved_item(successor)))
+    with fsutil.app_lock(), pytest.raises(engine.RefreshFailed):
+        engine.refresh_locked(account, old)
+    assert not journal().exists()

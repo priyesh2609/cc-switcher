@@ -19,6 +19,11 @@ NOW_MS = 1_800_000_000_000
         (NOW_MS + 1, 0, False),
         (None, 300, False),
         ("garbage", 300, True),
+        (float("nan"), 300, True),
+        (float("inf"), 300, True),
+        ("NaN", 300, True),
+        ("Infinity", 300, True),
+        (10**400, 300, True),
         (True, 300, True),
         (str(NOW_MS + 3_600_000), 300, False),
     ],
@@ -34,6 +39,12 @@ def test_is_expired_without_access_token():
     login["accessToken"] = ""
     assert oauth.is_expired(login, now_ms=NOW_MS) is True
     assert oauth.is_expired({}, now_ms=NOW_MS) is True
+
+
+@pytest.mark.parametrize("access", [True, 123, ["token"], {"value": "token"}, " ", "token\r\nInjected: yes"])
+def test_non_token_access_values_are_unusable(access):
+    login = dict(make_login(ACCOUNT_A), accessToken=access)
+    assert oauth.is_expired(login, now_ms=NOW_MS) is True
 
 
 def test_is_expired_uses_wall_clock_by_default():

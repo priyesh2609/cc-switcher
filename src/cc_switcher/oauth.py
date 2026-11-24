@@ -5,6 +5,7 @@ CCS does not perform OAuth token exchanges. Claude Code manages token renewal.
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -27,14 +28,18 @@ class RefreshRejected(OAuthError):
 def _to_float(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value.strip())
-        except ValueError:
-            return None
-    return None
+    if not isinstance(value, (int, float, str)):
+        return None
+    try:
+        number = float(value)
+    except (ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def valid_access_token(value: Any) -> bool:
+    """Whether a value can be used as one nonempty, printable ASCII bearer token."""
+    return isinstance(value, str) and bool(value) and all(0x21 <= ord(c) <= 0x7E for c in value)
 
 
 def is_expired(login: dict, skew_seconds: int = 300, now_ms: int | None = None) -> bool:
@@ -43,7 +48,7 @@ def is_expired(login: dict, skew_seconds: int = 300, now_ms: int | None = None) 
     ``expiresAt`` is epoch milliseconds. A missing expiry is treated as non-expiring,
     matching Claude Code's convention; an unreadable expiry is treated as expired.
     """
-    if not isinstance(login, dict) or not login.get("accessToken"):
+    if not isinstance(login, dict) or not valid_access_token(login.get("accessToken")):
         return True
     raw = login.get("expiresAt")
     if raw is None:

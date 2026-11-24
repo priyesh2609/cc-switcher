@@ -105,8 +105,8 @@ class FakeResponse:
         self.headers = headers or {}
         self.closed = False
 
-    def read(self):
-        return self._body
+    def read(self, size=-1):
+        return self._body if size < 0 else self._body[:size]
 
     def close(self):
         self.closed = True
@@ -160,6 +160,22 @@ def test_fetch_sends_the_documented_request_and_returns_the_json():
     assert response.closed
 
 
+def test_numeric_overflow_is_treated_as_an_unknown_number():
+    assert usage._num(10**400) is None
+
+
+def test_response_size_is_bounded_before_reading_not_after_allocating():
+    class LargeStream:
+        status = 200
+
+        def read(self, size=None):
+            assert size is not None, "an unbounded read can exhaust memory before the 2 MiB guard"
+            assert size <= usage.MAX_RESPONSE_BYTES + 1
+            return b"x" * size
+
+    assert fetch_error(response=LargeStream()).code == "bad_response"
+
+
 def test_fetch_accepts_an_opener_object_with_an_open_method():
     class Director:
         def open(self, request, timeout=None):
@@ -170,8 +186,8 @@ def test_fetch_accepts_an_opener_object_with_an_open_method():
 
 def test_fetch_accepts_text_bodies_and_getcode_responses():
     class Legacy:
-        def read(self):
-            return '{"ok": 1}'
+        def read(self, size=-1):
+            return '{"ok": 1}'[:size] if size >= 0 else '{"ok": 1}'
 
         def getcode(self):
             return 200

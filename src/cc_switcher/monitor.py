@@ -33,7 +33,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import os
 import time
 from dataclasses import dataclass, replace
@@ -314,7 +313,10 @@ def _empty_state() -> dict[str, Any]:
 
 def _read_state() -> dict[str, Any]:
     """The cache file with every section guaranteed to exist and be the right type. No lock."""
-    data = fsutil.read_json(paths.usage_cache_file(), {})
+    try:
+        data = fsutil.read_json(paths.usage_cache_file(), {})
+    except (ValueError, RecursionError):
+        data = {}
     state = _empty_state()
     if not isinstance(data, dict):
         return state
@@ -378,13 +380,22 @@ def _merge_attempt(state: dict[str, Any], account_id: str, snapshot: UsageSnapsh
 
     Returns the *effective* snapshot, i.e. what ``load_cache()`` will return for the account.
     """
+    current = None
+    try:
+        current = snapshot_from_dict(state["snapshots"].get(account_id))
+    except (ValueError, TypeError):
+        pass
+    record = state["errors"].get(account_id)
+    failed_at = usage.parse_datetime(record.get("last_error_at")) if isinstance(record, dict) else None
+    if current is not None and snapshot.fetched_at < current.fetched_at:
+        return current
     if snapshot.ok:
         state["snapshots"][account_id] = snapshot_to_dict(snapshot)
-        record = state["errors"].get(account_id)
-        failed_at = usage.parse_datetime(record.get("last_error_at")) if isinstance(record, dict) else None
-        if failed_at is None or snapshot.fetched_at >= failed_at:  # a success *after* the failure clears it
+        if failed_at is None or snapshot.fetched_at >= failed_at:
             state["errors"].pop(account_id, None)
         return snapshot
+    if failed_at is not None and snapshot.fetched_at < failed_at:
+        return current or snapshot
 
     code = snapshot.error or "unknown"
     state["errors"][account_id] = {"last_error": code, "last_error_at": _iso(snapshot.fetched_at)}
@@ -458,8 +469,8 @@ def cache_status(account_id: str, *, now: datetime | None = None) -> dict[str, A
             server_error = None
         deadline = usage.parse_datetime(row.get("next_allowed_at"))
         retry_after = row.get("retry_after_seconds")
-        if (not isinstance(retry_after, (int, float)) or isinstance(retry_after, bool)
-                or not math.isfinite(retry_after) or retry_after < 0):
+        if (not isinstance(retry_after, (int, float)) or usage._num(retry_after) is None
+                or retry_after < 0):
             retry_after = None
         result["rate_limit"] = {
             "endpoint": row["endpoint"],
@@ -668,12 +679,35 @@ def _refresh(
     return _Outcome(replace(snapshot, resets=status), None, new_row)
 
 
+def _merge_resets_rows(state: dict[str, Any], rows: dict[str, dict[str, Any]]) -> None:
+    for account_id, row in rows.items():
+        previous = state["resets_cache"].get(account_id)
+        previous = previous if isinstance(previous, dict) else {}
+        old_at = usage.parse_datetime(previous.get("fetched_at"))
+        new_at = usage.parse_datetime(row.get("fetched_at"))
+        merged = dict(previous if old_at is not None and (new_at is None or old_at > new_at) else row)
+        old_gate = usage.parse_datetime(previous.get("next_check_at"))
+        new_gate = usage.parse_datetime(row.get("next_check_at"))
+        if old_gate is not None and (new_gate is None or old_gate > new_gate):
+            merged["next_check_at"] = _iso(old_gate)
+        state["resets_cache"][account_id] = merged
+
+
+def _newer_attempt_exists(state: dict[str, Any], account_id: str, at: datetime) -> bool:
+    for section, key in (("snapshots", "fetched_at"), ("errors", "last_error_at")):
+        row = state[section].get(account_id)
+        when = usage.parse_datetime(row.get(key)) if isinstance(row, dict) else None
+        if when is not None and when > at:
+            return True
+    return False
+
+
 def _persist_resets_rows(rows: dict[str, dict[str, Any]]) -> None:
     """Best-effort write of redeemable-resets gate rows (one lock, no other cache section touched)."""
     try:
         with fsutil.app_lock():
             state = _read_state()
-            state["resets_cache"].update(rows)
+            _merge_resets_rows(state, rows)
             _write_state(state)
     except (fsutil.LockTimeout, OSError):
         logger.warning("Could not persist redeemable-resets state", exc_info=True)
@@ -705,7 +739,7 @@ def _backoff_seconds(retry_after: float | None, failures: int) -> float:
     if retry_after is not None and retry_after > 0:
         # Do not retry early when the server asks for longer than our default cap.
         return max(retry_after, BACKOFF_MIN_RETRY_AFTER)
-    seconds = BACKOFF_BASE_SECONDS * (2 ** max(failures - 1, 0))
+    seconds = BACKOFF_BASE_SECONDS * (2 ** min(max(failures - 1, 0), 6))
     return min(seconds, BACKOFF_MAX_SECONDS)
 
 
@@ -714,6 +748,19 @@ def _backoff_until(state: dict[str, Any], account_id: str) -> datetime | None:
     if not isinstance(row, dict):
         return None
     return usage.parse_datetime(row.get("next_allowed_at"))
+
+
+def _persist_rate_limit(snapshot: UsageSnapshot, row: dict[str, Any]) -> None:
+    try:
+        with fsutil.app_lock():
+            state = _read_state()
+            _merge_attempt(state, snapshot.account_id, snapshot)
+            previous = _backoff_until(state, snapshot.account_id)
+            if previous is None or previous <= usage.parse_datetime(row["next_allowed_at"]):
+                state["backoff"][snapshot.account_id] = row
+            _write_state(state)
+    except (fsutil.LockTimeout, OSError):
+        logger.warning("Could not publish usage retry deadline", exc_info=True)
 
 
 def refresh_all(
@@ -756,6 +803,8 @@ def refresh_all(
     did_fetch = False
 
     for account in account_list:
+        previous_state = _read_state()
+        previous = _snapshots_from_state(previous_state)
         allowed_at = _backoff_until(previous_state, account.id)
         if allowed_at is not None and now < allowed_at:
             results[account.id] = previous.get(account.id) or _error_snapshot(account.id, "rate_limited", now)
@@ -770,6 +819,12 @@ def refresh_all(
                 continue
         if did_fetch and delay_between > 0:
             sleep(delay_between)
+            previous_state = _read_state()
+            allowed_at = _backoff_until(previous_state, account.id)
+            if allowed_at is not None and now < allowed_at:
+                current = _snapshots_from_state(previous_state)
+                results[account.id] = current.get(account.id) or _error_snapshot(account.id, "rate_limited", now)
+                continue
         did_fetch = True
 
         outcome = _refresh(
@@ -786,7 +841,8 @@ def refresh_all(
 
         if snapshot.error == "rate_limited":
             old = previous_state["backoff"].get(account.id)
-            failures = (int(old.get("failures", 0)) if isinstance(old, dict) else 0) + 1
+            count = old.get("failures", 0) if isinstance(old, dict) else 0
+            failures = min(count, 7) + 1 if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 1
             wait = _backoff_seconds(retry_after, failures)
             # Retry-After starts when the response arrives, not when this poll began.
             # A request that takes 15 seconds followed by Retry-After: 120 must
@@ -799,6 +855,7 @@ def refresh_all(
                 "server_error": outcome.server_error,
                 "retry_after_seconds": retry_after,
             }
+            _persist_rate_limit(snapshot, backoff_updates[account.id])
         elif snapshot.ok:
             backoff_updates[account.id] = None
 
@@ -806,16 +863,22 @@ def refresh_all(
     try:
         with fsutil.app_lock():
             state = _read_state()  # fresh: another process may have written alert state meanwhile
+            outdated = {account_id for account_id, snapshot in fetched.items()
+                        if _newer_attempt_exists(state, account_id, snapshot.fetched_at)}
             for account_id, snapshot in fetched.items():  # real attempts only; skipped accounts are untouched
                 effective[account_id] = _merge_attempt(state, account_id, snapshot)
-            state["resets_cache"].update(resets_updates)
+            _merge_resets_rows(state, resets_updates)
             for account_id, update in backoff_updates.items():
+                if account_id in outdated:
+                    continue
+                current_deadline = _backoff_until(state, account_id)
                 if update is None:
-                    state["backoff"].pop(account_id, None)
-                else:
+                    if current_deadline is None or current_deadline <= (fixed_now or utcnow()):
+                        state["backoff"].pop(account_id, None)
+                elif current_deadline is None or current_deadline <= usage.parse_datetime(update["next_allowed_at"]):
                     state["backoff"][account_id] = update
             if full_refresh:
-                keep = {a.id for a in account_list}
+                keep = {a.id for a in store.load_accounts()}
                 for section in ("snapshots", "backoff", "errors", "resets_cache"):
                     state[section] = {k: v for k, v in state[section].items() if k in keep}
             _write_state(state)

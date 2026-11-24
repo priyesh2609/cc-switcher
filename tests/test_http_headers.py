@@ -106,3 +106,29 @@ def test_usage_and_reset_requests_send_no_user_agent_or_python_version(loopback_
         assert "user-agent" not in headers
         assert not any(re.search(r"(?i)python(?:-urllib)?[/ ]\d", str(value)) for value in headers.values())
     assert loopback_server[0]["headers"].get("Authorization") == "Bearer fake-access"
+
+
+@pytest.mark.parametrize("target", ["http://outside.test/stolen", "http://api.test/api/oauth/usage?at_wall=1", "http://api.test/api/organizations/org/reset_rate_limits"])
+def test_authenticated_redirects_cannot_leak_tokens_or_bypass_read_only_guard(monkeypatch, target):
+    import io
+    from email.message import Message
+    from urllib.response import addinfourl
+
+    seen = []
+
+    class OfflineHTTP(urllib.request.HTTPHandler):
+        def http_open(self, request):
+            seen.append(request.full_url)
+            headers = Message()
+            headers["Location"] = target
+            result = addinfourl(io.BytesIO(b"{}"), headers, request.full_url, 302 if len(seen) == 1 else 200)
+            result.msg = "Found"
+            return result
+
+    build_opener = urllib.request.build_opener
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *handlers: build_opener(OfflineHTTP(), *handlers))
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", _REAL_OPENER_OPEN)
+    monkeypatch.setattr(paths, "USAGE_URL", "http://api.test/api/oauth/usage")
+    with pytest.raises(usage.UsageError, match="HTTP 302"):
+        usage.fetch_usage_raw("fake-access")
+    assert seen == [paths.USAGE_URL]

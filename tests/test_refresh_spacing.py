@@ -331,8 +331,9 @@ def fake_usage_opener(request, timeout=None):
     class Response:
         status = 200
 
-        def read(self):
-            return json.dumps({"five_hour": {"utilization": 42}}).encode()
+        def read(self, size=-1):
+            body = json.dumps({"five_hour": {"utilization": 42}}).encode()
+            return body if size < 0 else body[:size]
 
         def close(self):
             pass

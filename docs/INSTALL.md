@@ -57,7 +57,7 @@ If you already cloned the repository, fetch the pushed commit and check out the 
 
 ```bash
 ccs add --label work         # repeat for each other account, signing in separately
-ccs --version                # 0.2.1 includes credential-file import; also check the source commit above
+ccs --version                # 0.2.2 includes credential import and token/usage hardening; also check the source commit above
 ccs doctor
 ccs list
 ```

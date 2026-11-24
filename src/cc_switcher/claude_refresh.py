@@ -34,7 +34,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import math
 import os
 import re
 import shutil
@@ -42,13 +41,12 @@ import signal
 import stat
 import subprocess
 import tempfile
-import time
 import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any
 
-from cc_switcher import creds, fsutil, keychain, paths
+from cc_switcher import creds, fsutil, keychain, oauth, paths
 from cc_switcher.models import Account
 
 CHILD_TIMEOUT_SECONDS = 90
@@ -122,7 +120,7 @@ def _sync_dir(path: Path) -> None:
 def _read_private_json(path: Path, *, dir_fd: int | None = None) -> Any:
     # Do not follow a child-created symlink, accept a hardlink, or silently default
     # an unreadable file to {}. A malformed R2 must never be mistaken for no R2.
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
@@ -457,7 +455,7 @@ def _prepare(account: Account, login: dict[str, Any], attr: str) -> tuple[Path, 
 
 def _usable(login: dict[str, Any]) -> bool:
     expires = login.get("expiresAt")
-    return isinstance(login.get("accessToken"), str) and bool(login["accessToken"]) and not isinstance(expires, bool) and isinstance(expires, (int, float)) and math.isfinite(expires) and expires > time.time() * 1000 + 30_000
+    return oauth.valid_access_token(login.get("accessToken")) and oauth._to_float(expires) is not None and not oauth.is_expired(login, skew_seconds=30)
 
 
 def _persist(account: Account, before: dict[str, Any], candidate: dict[str, Any], attr: str) -> None:
@@ -465,8 +463,9 @@ def _persist(account: Account, before: dict[str, Any], candidate: dict[str, Any]
     if current != before and current != candidate:
         raise RecoveryRequired(_RECOVERY)
     if current != candidate:
-        payload = _safe_payload(account.keychain_service, attr, candidate)
-        keychain.write(account.keychain_service, attr, payload)
+        saved_attr = keychain.read_account_attr(account.keychain_service) or attr
+        payload = _safe_payload(account.keychain_service, saved_attr, candidate)
+        keychain.write(account.keychain_service, saved_attr, payload)
     if _saved_login(account) != candidate:
         raise RecoveryRequired(_RECOVERY)
 
