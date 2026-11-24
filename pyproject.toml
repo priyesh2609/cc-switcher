@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cc-switcher"
-version = "0.2.0"
+version = "0.2.1"
 description = "macOS menu bar + CLI to switch Claude Code accounts while keeping one fixed set of MCP sign-ins"
 readme = "README.md"
 license = "MIT"

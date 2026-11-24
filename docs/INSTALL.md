@@ -57,7 +57,7 @@ If you already cloned the repository, fetch the pushed commit and check out the 
 
 ```bash
 ccs add --label work         # repeat for each other account, signing in separately
-ccs --version                # 0.2.0 for this version; also check the source commit above
+ccs --version                # 0.2.1 includes credential-file import; also check the source commit above
 ccs doctor
 ccs list
 ```
@@ -72,7 +72,7 @@ ccs agent status
 
 These checks do not prove an inactive-account renewal worked. A usage refresh makes network requests and, when the feature is enabled and an inactive token has expired, can invoke a noninteractive Claude Code model request that consumes plan usage and may incur charges. To leave renewal disabled, skip the settings command; you can still start the agent.
 
-Apply your MCP profile separately (the section after). Saved logins, recovery credentials, MCP sign-ins and the account list do not carry over by themselves. Do not copy tokens or recovery files between Macs. After `ccs mcp apply`, run `claude`, open `/mcp` and sign in to each server once (see [MCP.md](MCP.md)).
+Apply your MCP profile separately (the section after). Saved logins, MCP sign-ins and the account list do not carry over by themselves. Separate sign-ins are recommended for independent use on two Macs; deliberate credential-backup migration has an offline file-import workflow and shared-grant caveats below. Do not copy isolated-renewal recovery directories between Macs. After `ccs mcp apply`, run `claude`, open `/mcp` and sign in to each server once (see [MCP.md](MCP.md)).
 
 ## Add your accounts (on each Mac, once per account)
 
@@ -88,9 +88,33 @@ This runs `claude auth login`, which opens your browser. Sign in to the account 
 ccs list
 ```
 
-For another Mac, sign in separately rather than copying saved tokens. Two copies of a refresh token can diverge when either one is rotated; the older copy may then stop working. cc-switcher does not provide a supported cross-device token-transfer workflow.
+For normal use on two Macs, sign in separately rather than copying saved tokens. Two copies of a refresh token can diverge when either one is rotated; the older copy may then stop working. Offline credential-file import is available for deliberate migration or recovery (below), but it does not create independent logins or guarantee that copied credentials are still valid.
 
 From the menu bar you can also choose **Add account...**. It opens Terminal running `ccs add`, because the sign-in needs a browser and visible prompts, and the menu refreshes when it finishes.
+
+## Import an existing JSON/text credential copy
+
+Use this only for credential files you own. Separate native sign-ins remain the recommended setup for using two Macs regularly. A copied grant is not a new login: for example, if both Macs hold R1 at 10:00 and the original Mac rotates it to R2 at 10:05, R1 on the destination may be rejected with `invalid_grant`. This is a shared-grant limitation with both direct and Claude-driven renewal, not a file-import fix.
+
+The file must be a private regular file owned by your macOS user. Full Keychain JSON containing `claudeAiOauth`, a raw login JSON object, and the hex-encoded JSON value from `security -w` are accepted. Each login must include valid `accountUuid` and `organizationUuid` UUID strings and at least one token; CCS will not guess missing identities or query an account to find them. A file containing only a token string is not sufficient. Expired tokens may be imported, but their online validity is not checked.
+
+To avoid automatic background checks while preparing the import, stop the menu-bar app first (also quit any manually started copy):
+
+```bash
+ccs agent uninstall
+chmod 600 /private/path/work-credentials.json
+ccs import --file /private/path/work-credentials.json --label work
+ccs list
+```
+
+This command:
+
+- Writes only the account login into a **new** saved CCS Keychain entry. It does not activate the account or overwrite the live Claude login, MCP credentials, an existing saved item, or a duplicate account/label.
+- Makes no authentication, usage or token-refresh request. It does not open a browser or run Claude Code. A running menu-bar process may independently check imported accounts on a later poll; importing does not pause it.
+- Validates types and the stored Keychain readback before registering the account. Unknown login fields are dropped; email/profile fields are not inferred from arbitrary file contents, so use a label to identify the account.
+- Leaves the source file untouched. Keep it private; do not paste it into chat, terminal arguments, logs, a repository, or a shared folder. CCS never automatically deletes this recovery source.
+
+Once ready to resume normal polling, run `ccs agent install`. If experimental renewal is enabled, a later poll can invoke Claude Code for an expired inactive login and consume account usage. Existing-account imports are deliberately refused: do not remove a working saved login merely to make room for an older file. If Keychain import or account registration reports an uncertain result, retain the source file and investigate rather than repeatedly reimporting.
 
 ## Carry your fixed MCP set to another Mac
 

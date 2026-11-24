@@ -814,6 +814,15 @@ def cmd_add(args: argparse.Namespace) -> int:
 
 
 def cmd_import(args: argparse.Namespace) -> int:
+    if getattr(args, "file", None) is not None:
+        importer = _mod("credential_import")
+        try:
+            account = importer.import_file(args.file, label=args.label or "")
+        except importer.CredentialImportError as exc:
+            raise CliError(str(exc)) from None
+        print(f"Imported {_who(account)}; not activated. Credentials were not validated online.")
+        print("The source file was left untouched. A running menu bar app may check usage later.")
+        return EXIT_OK
     account = _mod("switcher").import_current(label=args.label or "")
     org = f" in {account.organization_name}" if account.organization_name else ""
     plan = f", {account.subscription_type.capitalize()}" if account.subscription_type else ""
@@ -1352,8 +1361,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p = add("add", cmd_add, "sign in to another Claude account and save it")
     p.add_argument("--label", help="nickname for the account, e.g. work")
 
-    p = add("import", cmd_import, "save the account you are signed in to right now")
+    p = add("import", cmd_import, "save the current login, or import a private credential file without activating it")
     p.add_argument("--label", help="nickname for the account")
+    p.add_argument("--file", metavar="PATH", help="private JSON/text credential copy (offline, new accounts only)")
 
     p = add("remove", cmd_remove, "forget a saved account (the Claude account itself is untouched)")
     p.add_argument("query", help="label, email or id")

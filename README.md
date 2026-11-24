@@ -67,6 +67,7 @@ Run `ccs` with no command to list accounts. Exit codes: 0 ok, 1 error, 2 bad usa
 | `ccs next [--cached]` | Switch to the best other account that has room, judged by fresh usage. |
 | `ccs add [--label NAME]` | Sign in to another account (`claude auth login`) and save it. |
 | `ccs import [--label NAME]` | Save the account you are signed in to right now. |
+| `ccs import --file PATH [--label NAME]` | Import a private JSON/text credential copy offline as a new saved account, without activating it. Never overwrites an existing account. |
 | `ccs remove <account> [--force]` | Forget a saved account. `--force` allows the active one. |
 | `ccs label <account> <label>` | Set or clear a nickname. |
 | `ccs settings [key [value]]` | Show or change settings (poll interval, alert thresholds, auto-switch, menu bar title). |
